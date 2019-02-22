@@ -1,92 +1,68 @@
 package polyparse
 
-import scala.collection.immutable.Set
 import scala.quoted._
 import scala.quoted.Toolbox.Default._
 
-sealed abstract class ParseResult[Result]
-case class ParseSuccess[Result](result : Result) extends ParseResult[Result]
-case class ParseFailure[Result](position : Int, message : String) extends ParseResult[Result]
-
-private case class GrammarContext[SeqType,A](
-  next : Expr[Unit],
-  read : Expr[A],
-  mark : Expr[Int],
-  restore : Expr[Int] => Expr[Unit],
-  seq : Expr[SeqType],
-  isEOF : Expr[Boolean],
-  rec : Map[Grammar[_,_,_],Any],
-)
-
-sealed private trait UnguardedGrammar[Result : Type, SeqType <: Seq[A], A : Type] {
-  def capture(ctx : GrammarContext[SeqType, A])(implicit st : Type[SeqType]) : Expr[Option[Result]]
-  //def check(ctx : GrammarContext[SeqType, A])(implicit st : Type[SeqType]) : Expr[Boolean]
+sealed trait Grammar[T] {
+  
 }
 
-sealed class Grammar[Result : Type, SeqType <: Seq[A], A : Type](g : =>UnguardedGrammar[Result, SeqType, A]) extends UnguardedGrammar[Result, SeqType, A] {
-  def parser(implicit st : Type[SeqType]) : Expr[SeqType => Option[Result]] = '{
-    (seq : SeqType) => {
-      var i = 0;
-      ~capture(GrammarContext(
-        next='(i += 1),
-        read='(seq(i)),
-        mark='(i),
-        restore=(r : Expr[Int]) => '(i = ~r),
-        seq='(seq),
-        isEOF='(i >= seq.length),
-        rec=Map(),
-      ))
-    }
-  }
-  
-  def capture(ctx : GrammarContext[SeqType, A])(implicit st : Type[SeqType]) : Expr[Option[Result]] =
-    ctx.rec.get(this) match {
-      case Some(recursion) => '{
-        val (cap : Option[Result], ii : Int) = (~recursion.asInstanceOf[Expr[(SeqType, Int) => (Option[Result], Int)]])(~ctx.seq, ~ctx.mark);
-        ~ctx.restore('(ii));
-        cap
-      }
-      case None => '{
-        def self(seq : SeqType, outerI : Int) : (Option[Result], Int) = {
-          var i = outerI;
-          val cap = ~g.capture(GrammarContext(
-            next='(i += 1),
-            read='(seq(i)),
-            mark='(i),
-            restore=(r : Expr[Int]) => '(i = ~r),
-            seq='(seq),
-            isEOF='(i >= seq.length),
-            rec=ctx.rec.+((this, '(self))),
-          ));
-          (cap, i)
-        }
-        ~g.capture(GrammarContext(
-          next=ctx.next,
-          read=ctx.read,
-          mark=ctx.mark,
-          restore=ctx.restore,
-          seq=ctx.seq,
-          isEOF=ctx.isEOF,
-          rec=ctx.rec.+((this, '(self))),
-        ))
-      }
-    }
-  
-  //def check(ctx : GrammarContext[SeqType, A])(implicit st : Type[SeqType]) : Expr[Boolean]
+sealed trait Value[T] {
+
 }
 
 object Implicits {
-  import scala.language.implicitConversions
+  implicit class SubGrammar[T](g : =>Grammar[T]) {
+    def <|>(other : SubGrammar[T]) : Grammar[T] = Disjunction(this, other)
+    def +[Other](other : SubGrammar[Other]) : Grammar[(T,Other)] = Tuple(this, other)
+  }
 
-  implicit def makeGuarded[Result : Type, SeqType <: Seq[A], A : Type](g : =>UnguardedGrammar[Result, SeqType, A]) : Grammar[Result, SeqType, A] =
-    new Grammar(g)
 }
 
-case class exactly[SeqType <: Seq[A], A : Liftable : Type](v : A) extends UnguardedGrammar[A,SeqType,A] {
-  def capture(ctx : GrammarContext[SeqType, A])(implicit st : Type[SeqType]) : Expr[Option[A]] =
-    '{ val r = ~ctx.read; if (r == ~(v.toExpr)) { ~ctx.next; Some(r) } else None }
+import Implicits._
 
-  /*def check(ctx : GrammarContext[A], rec : Set[Any])(implicit st : Type[SeqType]) : Expr[Boolean] =
-    '{ if (~ctx.read == ~(v.toExpr)) { ~ctx.next; true } else false } */
+case class PlainValue[T : Liftable](val v : T) extends Value[T]
+class RegisterValue[T] extends Value[T]
+
+private case class Terminal[T](val v : Value[T]) extends Grammar[T]
+private case class Tuple[A,B](val left : SubGrammar[A], val right : SubGrammar[B]) extends Grammar[(A,B)]
+private case class IgnoreLeft[T](val left : SubGrammar[T], val right : SubGrammar[T]) extends Grammar[T]
+private case class IgnoreRight[T](val left : SubGrammar[T], val right : SubGrammar[T]) extends Grammar[T]
+private case class Disjunction[T](val left : SubGrammar[T], val right : SubGrammar[T]) extends Grammar[T]
+private case class Condition[A,T](val g : SubGrammar[T], val v : Value[A], val cond : A => Boolean) extends Grammar[T]
+private case class AppliedLam[A,T](val reg : RegisterValue[A], val arg : Value[A], val body : SubGrammar[T]) extends Grammar[T]
+
+
+sealed abstract class GLam[-Arg, SR <: GLam[_,SR]] {
+  type SResult = SR
+  def sub[A2](reg2 : RegisterValue[A2], arg : Value[A2]) : SR
 }
+
+case class Lam[A,T](val reg : RegisterValue[A], val g : SubGrammar[T]) extends GLam[A,Lam[A,T]] {
+  def apply(arg : Value[A]) : Grammar[T] = AppliedLam(reg, arg, g)
+  def sub[A2](reg2 : RegisterValue[A2], arg : Value[A2]) : Lam[A,T] = Lam(reg,AppliedLam(reg2, arg, g))
+}
+case class PLam[A,L<:GLam[_,L]](val reg : RegisterValue[A], val l : L) extends GLam[A,PLam[A,L]] {
+  def apply(arg : Value[A]) : l.SResult = l.sub(reg, arg)
+  def sub[A2](reg2 : RegisterValue[A2], arg : Value[A2]) : PLam[A,L] = PLam[A,L](reg, l.sub(reg2, arg))
+
+}
+
+object Defs {
+
+  implicit def Const2Value[T : Liftable](v : T) : Value[T] = PlainValue(v)
+
+  def term[T](v : Value[T]) : Grammar[T] = Terminal(v)
+
+  def lam[A,T](scope : Value[A] => Grammar[T]) : Lam[A,T] = {
+    val reg = new RegisterValue[A]()
+    Lam(reg, scope(reg))
+  }
+  def lam[A,L <: GLam[_,L]](scope : Value[A] => L) : PLam[A,L] = {
+    val reg = new RegisterValue[A]()
+    PLam(reg, scope(reg))
+  }
+}
+
+import Defs._
 
