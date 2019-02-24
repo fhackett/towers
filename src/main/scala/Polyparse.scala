@@ -1,10 +1,30 @@
 package polyparse
 
 import scala.quoted._
-import scala.quoted.Toolbox.Default._
+//import scala.quoted.Toolbox.Default._
 
 
-object PolyParse {
+sealed trait A[T:Type] {
+  val t = implicitly[Type[T]]
+}
+
+case class B[T:Liftable:Type](val v : T) extends A[T] {
+  val liftable = implicitly[Liftable[T]]
+}
+case class C[T1:Type,T2:Type](val v1 : A[T1], val v2 : A[T2]) extends A[(T1,T2)]
+
+object D {
+  def proc[T:Type](a : A[T]) : Expr[T] = a match {
+    case b@B(v) => v.toExpr(b.liftable)
+    case C(v1,v2) => {
+      implicit val v1t = v1.t
+      implicit val v2t = v2.t
+      '( (~proc(v1), ~proc(v2)) )
+    }
+  }
+}
+
+/*object PolyParse {
 
   sealed trait Grammar[T](_tType : Type[T]) {
     val tType : Type[T] = _tType
@@ -21,20 +41,20 @@ object PolyParse {
   class RegisterValue[T] extends Value[T]
 
   private case class Terminal[T:Type](val v : Value[T]) extends Grammar[T](implicitly[Type[T]])
-  private case class Tuple[A:Type,B:Type](val left : Grammar[A], val right : Grammar[B]) extends Grammar[(A,B)]('[(~left.tType,~right.tType)])
+  private case class Tuple[A,B](val left : Grammar[A], val right : Grammar[B]) extends Grammar[(A,B)]('[(~left.tType,~right.tType)])
   //private case class IgnoreLeft[T](val left : Grammar[T], val right : Grammar[T]) extends Grammar[T]
   //private case class IgnoreRight[T](val left : Grammar[T], val right : Grammar[T]) extends Grammar[T]
-  private case class Disjunction[T:Type](val left : Grammar[T], val right : Grammar[T]) extends Grammar[T](implicitly[Type[T]])
-  private case class Condition[T:Type](val g : Grammar[T], val cond : Expr[T] => Expr[Boolean]) extends Grammar[T](implicitly[Type[T]])
+  private case class Disjunction[T](val left : Grammar[T], val right : Grammar[T]) extends Grammar[T](left.tType)
+  private case class Condition[T](val g : Grammar[T], val cond : Expr[T] => Expr[Boolean]) extends Grammar[T](g.tType)
   private case class PutValue[T:Type](val v : Value[T]) extends Grammar[T](implicitly[Type[T]])
-  private case class TakeValue[T1:Type,T2:Type](val g : Grammar[T1], val v : RegisterValue[T1], val gg : Grammar[T2]) extends Grammar[T2](implicitly[Type[T2]])
-  private case class Mapping[T1:Type,T2:Type](val from : Grammar[T1], val m : Expr[T1] => Expr[T2]) extends Grammar[T2](implicitly[Type[T2]])
+  private case class TakeValue[T1,T2](val g : Grammar[T1], val v : RegisterValue[T1], val gg : Grammar[T2]) extends Grammar[T2](gg.tType)
+  private case class Mapping[T1,T2:Type](val from : Grammar[T1], val m : Expr[T1] => Expr[T2]) extends Grammar[T2](implicitly[Type[T2]])
   //private case class AppliedLam[A,T](val reg : RegisterValue[A], val arg : Value[A], val body : Grammar[T]) extends Grammar[T]
   private class Recursion[T:Type](_g : =>Grammar[T]) extends Grammar[T](implicitly[Type[T]]) {
     lazy val g = _g
   }
 
-  /*sealed abstract class GLam[-Arg, SR <: GLam[_,SR]] {
+  //sealed abstract class GLam[-Arg, SR <: GLam[_,SR]] {
     type SResult = SR
     def sub[A2](reg2 : RegisterValue[A2], arg : Value[A2]) : SR
   }
@@ -46,7 +66,7 @@ object PolyParse {
   case class PLam[A,L<:GLam[_,L]](val reg : RegisterValue[A], val l : L) extends GLam[A,PLam[A,L]] {
     def apply(arg : Value[A]) : l.SResult = l.sub(reg, arg)
     def sub[A2](reg2 : RegisterValue[A2], arg : Value[A2]) : PLam[A,L] = PLam[A,L](reg, l.sub(reg2, arg))
-  }*/
+  }
 
   private def maybeRecurse[T:Type](g : =>Grammar[T]) : Grammar[T] = if g == null then new Recursion(g) else g
 
@@ -67,7 +87,7 @@ object PolyParse {
 
   def term[T:Type](v : Value[T]) : Grammar[T] = Terminal(v)
 
-  /*def lam[A,T](scope : Value[A] => Grammar[T]) : Lam[A,T] = {
+  //def lam[A,T](scope : Value[A] => Grammar[T]) : Lam[A,T] = {
     val reg = new RegisterValue[A]()
     Lam(reg, scope(reg))
   }
@@ -75,7 +95,7 @@ object PolyParse {
   def lam[A,L <: GLam[_,L]](scope : Value[A] => L) : PLam[A,L] = {
     val reg = new RegisterValue[A]()
     PLam(reg, scope(reg))
-  }*/
+  }
 
   trait SequenceContext[T,SeqT] {
     type Mark
@@ -114,15 +134,15 @@ object PolyParse {
     mkCtx(ctx => {
       def handleRec[T:Type](gg : Grammar[T], recMap : Map[AnyRef,Expr[() => _]]) : Expr[Option[T]] = {
         if recursions.contains(g) then '{
-          /*def rec() : Option[T] = ~codegen(g, recMap.+(gg, '(() => rec())))
-          rec()*/
+          //def rec() : Option[T] = ~codegen(g, recMap.+(gg, '(() => rec())))
+          rec()
           None
         } else '{
           ~codegen(gg, recMap)
         }
       }
       def codegen[T:Type](g : Grammar[T], recMap : Map[AnyRef,Expr[() => Any]]) : Expr[Option[T]] = g match {
-        case Terminal(v) => '{ if !(~ctx.isEOF()) then None /*~ctx.peek() FIXME */ else None }
+        case Terminal(v) => '{ if !(~ctx.isEOF()) then None //~ctx.peek() FIXME  else None }
         case Tuple(a,b) => '{ 
           (~handleRec(a, recMap)(a.tType)).flatMap((v1 : ~a.tType) => (~handleRec(b, recMap)(b.tType)).map((v2 : ~b.tType) => (v1, v2)))
         }
@@ -132,8 +152,8 @@ object PolyParse {
         case Condition(a,cond) => '{
           (~handleRec(a, recMap)).flatMap(v => if ~cond('(v)) then Some(v) else None)
         }
-        case PutValue(v) => '{ None } /* FIXME */
-        case TakeValue(a,v,b) => '{ None } /* FIXME */
+        case PutValue(v) => '{ None } // FIXME 
+        case TakeValue(a,v,b) => '{ None } // FIXME 
         case Mapping(a,fn) => '{
           (~handleRec(a, recMap)(a.tType)).map((v : ~a.tType) => ~fn('(v)))
         }
@@ -144,10 +164,10 @@ object PolyParse {
       handleRec(g, Map.empty)
     })
 
-    /*def impl[T](g : Grammar[T]) = {
+    //def impl[T](g : Grammar[T]) = {
       
     }
-    '(s => None) */
+    '(s => None) 
   }
-}
+}*/
 
