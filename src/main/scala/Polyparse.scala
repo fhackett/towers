@@ -64,8 +64,24 @@ trait SequenceContext[ET:Type] {
   def next() : Expr[Unit]
 }
 
-trait MakeSequenceContext[SeqT <: [ET] => Any] {
-  def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[SeqT[ET] => Result]
+/*class Block[Input,Result](val e : Expr[Unit], val pc : Int)(implicit ctx : ControlFlowContext) {
+  var result : Expr[Result]
+}
+
+class ControlFlowContext {
+  var nextPC = 0
+  var blockMap : Map[Int,Block] = Map.empty
+  def addBlock = {
+    val pc = nextPC
+    nextPC += 1
+    val block = new Block('(), pc, this)
+    blockMap = blockMap + (pc, block)
+    block
+  }
+}*/
+
+trait MakeSequenceContext[Seq[_]] {
+  def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[Seq[ET] => Result]
 }
 
 object PolyParse {
@@ -127,7 +143,7 @@ object PolyParse {
     })
   }
 
-  def compile[T:Type,ET:Type,Seq <: [ET] => Any :MakeSequenceContext](g : Grammar[T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
+  def compile[T:Type,ET:Type,Seq<:[ET]=>Any:MakeSequenceContext](g : Grammar[T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
     def findRecursions[T,ET](g : Grammar[T,ET]) : Set[Grammar[_,_]] = g match {
       case Terminal(_) => Set.empty
       case Tuple(a,b) => findRecursions(a) | findRecursions(b)
