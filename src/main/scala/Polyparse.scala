@@ -55,13 +55,17 @@ private class Recursion[T:Type,ET:Type](_g : =>Grammar[T,ET]) extends Grammar[T,
   lazy val g = _g
 }
 
-trait SequenceContext[T,SeqT] {
+trait SequenceContext[ET:Type] {
   type Mark
   def mark() : Expr[Mark]
   def restore(m : Expr[Mark]) : Expr[Unit]
-  def peek() : Expr[T]
+  def peek() : Expr[ET]
   def isEOF() : Expr[Boolean]
   def next() : Expr[Unit]
+}
+
+trait MakeSequenceContext[SeqT <: [ET] => Any] {
+  def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[SeqT[ET] => Result]
 }
 
 object PolyParse {
@@ -109,19 +113,21 @@ object PolyParse {
     PLam(reg, scope(reg))
   }*/
 
-  def makeListContext[T:Type,Result:Type](fn : SequenceContext[T,List[T]] => Expr[Result]) = '((list_ : List[T]) => {
-    var list = list_
-    ~fn(new {
-      type Mark = List[T]
-      def mark() : Expr[Mark] = '{ list }
-      def restore(m : Expr[Mark]) : Expr[Unit] = '{ list = ~m }
-      def peek() : Expr[T] = '{ list.head }
-      def isEOF() : Expr[Boolean] = '{ list.isEmpty }
-      def next() : Expr[Unit] = '{ list = list.tail }
+  implicit object MakeListContext extends MakeSequenceContext[List] {
+    def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[List[ET] => Result] = '((list_ : List[ET]) => {
+      var list = list_
+      ~fn(new {
+        type Mark = List[ET]
+        def mark() : Expr[Mark] = '{ list }
+        def restore(m : Expr[Mark]) : Expr[Unit] = '{ list = ~m }
+        def peek() : Expr[ET] = '{ list.head }
+        def isEOF() : Expr[Boolean] = '{ list.isEmpty }
+        def next() : Expr[Unit] = '{ list = list.tail }
+      })
     })
-  })
+  }
 
-  def compile[T:Type,ET:Type,SeqT:Type](g : Grammar[T,ET], mkCtx : (SequenceContext[ET,SeqT] => Expr[Option[T]]) => Expr[SeqT => Option[T]]) : Expr[SeqT => Option[T]] = {
+  def compile[T:Type,ET:Type,Seq <: [ET] => Any :MakeSequenceContext](g : Grammar[T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
     def findRecursions[T,ET](g : Grammar[T,ET]) : Set[Grammar[_,_]] = g match {
       case Terminal(_) => Set.empty
       case Tuple(a,b) => findRecursions(a) | findRecursions(b)
@@ -135,7 +141,7 @@ object PolyParse {
     val recursions = findRecursions(g)
     println(recursions)
 
-    mkCtx(ctx => {
+    implicitly[MakeSequenceContext[Seq]].makeCtx(ctx => {
       def handleRec[T:Type](g : Grammar[T,ET], recMap : Map[AnyRef,Expr[Option[Any]]]) : Expr[Option[T]] = {
         if recursions.contains(g) then '{
           def rec() : Option[T] = ~codegen(g, recMap.+((g, '(rec()))))
@@ -191,7 +197,7 @@ object PolyParse {
     object vv {
       val v : Grammar[(Int,Int),Int] = (term(const(1)) ++ term(const(2))) <|> v
     }
-    compile(vv.v, makeListContext[Int,Option[(Int,Int)]]).show
+    compile(vv.v).show
   }
 }
 
