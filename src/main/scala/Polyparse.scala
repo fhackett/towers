@@ -46,14 +46,14 @@ class BlockContext {
     nBlock
   }
   /*def reify[Result:Type](initBlock : Block[_,_]) : Expr[Result] = '{
-    var pc = ~block.label
+    var pc = $block.label
     var arg : Any = Null
     var loop = true
     while(loop) {
-      ~{
-        (0 until nextPC).foldRight('())((i, r) => '{ if pc == ~(i) then {
-          arg = ~blocks(i).fn('(arg.asInstanceOf[~[blocks(i).aType]]))
-        } else ~r })
+      ${
+        (0 until nextPC).foldRight('())((i, r) => '{ if pc == $(i) then {
+          arg = $blocks(i).fn('(arg.asInstanceOf[$[blocks(i).aType]]))
+        } else $r })
       }
     }
   }*/
@@ -61,7 +61,7 @@ class BlockContext {
 
 case class Block[Input](val label : Int, val fn : Expr[Input] => Expr[Any]) {
   def goto(input : Expr[Input])(implicit ctx : BlockContext) : Expr[Unit] = {
-    '()
+    '{()}
   }
 }
 
@@ -85,17 +85,17 @@ object PolyParse {
   def $$[T:Type] : Grammar[T,T,Any] = ArgToVal()
 
   implicit object MakeListContext extends MakeSequenceContext[List] {
-    def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[List[ET] => Result] = '((list_ : List[ET]) => {
+    def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[List[ET] => Result] = '{(list_ : List[ET]) => {
       var list = list_
-      ~fn(new {
+      ${fn(new {
         type Mark = List[ET]
         def mark() : Expr[Mark] = '{ list }
-        def restore(m : Expr[Mark]) : Expr[Unit] = '{ list = ~m }
+        def restore(m : Expr[List[ET]]) : Expr[Unit] = '{ list = $m } // replace with Mark once Dotty devs fix
         def peek() : Expr[ET] = '{ list.head }
         def isEOF() : Expr[Boolean] = '{ list.isEmpty }
         def next() : Expr[Unit] = '{ list = list.tail }
-      })
-    })
+      })}
+    }}
   }
 
   /*def makeControlFlow(fn : Block[Unit,Unit] => Unit) : Expr[Unit] = {
@@ -119,20 +119,20 @@ object PolyParse {
     implicitly[MakeSequenceContext[Seq]].makeCtx(ctx => {
       def handleRec[AT:Type,T:Type](g : Grammar[AT,T,ET], recMap : Map[AnyRef,Expr[Option[Any]]]) : Expr[Option[T]] = {
         if recursions.contains(g) then '{
-          def rec() : Option[T] = ~codegen(g, recMap.+((g, '(rec()))))
+          def rec() : Option[T] = ${codegen(g, recMap.+((g, '{rec()})))}
           rec()
         } else '{
-          ~codegen(g, recMap)
+          ${codegen(g, recMap)}
         }
       }
       def codegen[AT:Type,T:Type](g : Grammar[AT,T,ET], recMap : Map[AnyRef,Expr[Option[Any]]]) : Expr[Option[T]] = g match {
         case t@Terminal(v) => {
           implicit val liftable = t.liftable
           '{
-            if !(~ctx.isEOF()) then {
-              val p = ~ctx.peek()
-              if p == ~v.toExpr then {
-                ~ctx.next()
+            if !(${ctx.isEOF()}) then {
+              val p = ${ctx.peek()}
+              if p == ${v.toExpr} then {
+                ${ctx.next()}
                 Some(p)
               } else None
             } else None
@@ -144,26 +144,24 @@ object PolyParse {
           implicit val bt = b.tType
           implicit val abt = b.aType
           '{ 
-            (~handleRec(a, recMap)).flatMap(v1 => (~handleRec(b, recMap)).map(v2 => (v1, v2)))
+            ${handleRec(a, recMap)}.flatMap(v1 => ${handleRec(b, recMap)}.map(v2 => (v1, v2)))
           }
         }
         case Disjunction(a,b) => '{
-          (~handleRec(a, recMap)).orElse(~handleRec(b, recMap))
+          ${handleRec(a, recMap)}.orElse(${handleRec(b, recMap)})
         }
         /*case Condition(a,cond) => '{
-          (~handleRec(a, recMap)).flatMap(v => if ~cond('(v)) then Some(v) else None)
+          ($handleRec(a, recMap)).flatMap(v => if $cond('(v)) then Some(v) else None)
         }*/
         //case PutValue(v) => '{ None } // FIXME 
         //case TakeValue(a,v,b) => '{ None } // FIXME 
         /*case Mapping(a,fn) => {
           implicit val at = a.tType
           '{
-            (~handleRec(a, recMap)).map(v => ~fn('(v)))
+            ($handleRec(a, recMap)).map(v => $fn('(v)))
           }
         }*/
-        case r : Recursion[AT,T,ET] => '{
-          (~recMap.get(r.g).get.asInstanceOf[Expr[Option[T]]])
-        }
+        case r : Recursion[AT,T,ET] => recMap.get(r.g).get.asInstanceOf[Expr[Option[T]]]
       }
       handleRec(g, Map.empty)
     })

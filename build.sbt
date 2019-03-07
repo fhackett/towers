@@ -4,6 +4,6 @@ lazy val root = project
     name := "polyparse",
     version := "0.1.0",
 
-    scalaVersion := "0.12.0-RC1",
+    scalaVersion := dottyLatestNightlyBuild.get,
 )
 
