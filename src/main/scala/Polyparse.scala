@@ -35,34 +35,18 @@ trait SequenceContext[ET:Type] {
   def next() : Expr[Unit]
 }
 
-class BlockContext {
-  import collection.mutable.Map
-  val blocks : Map[Int,Block[_]] = Map.empty
-  var nextPC = 0
-  def makeBlock[Input](fn : Expr[Input] => Expr[Any]) : Block[Input] = {
-    val nBlock = Block(nextPC, fn)
-    blocks(nextPC) = nBlock
-    nextPC += 1
-    nBlock
-  }
-  /*def reify[Result:Type](initBlock : Block[_,_]) : Expr[Result] = '{
-    var pc = $block.label
-    var arg : Any = Null
-    var loop = true
-    while(loop) {
-      ${
-        (0 until nextPC).foldRight('())((i, r) => '{ if pc == $(i) then {
-          arg = $blocks(i).fn('(arg.asInstanceOf[$[blocks(i).aType]]))
-        } else $r })
-      }
-    }
-  }*/
-}
+trait ControlFlowContext[Result] {
+  type Label
 
-case class Block[Input](val label : Int, val fn : Expr[Input] => Expr[Any]) {
-  def goto(input : Expr[Input])(implicit ctx : BlockContext) : Expr[Unit] = {
-    '{()}
-  }
+  def block(fn : Label => Expr[Unit]) : Label
+
+  def end(v : Expr[Result]) : Expr[Unit]
+
+  def call(label : Label, ret : Label, arg : Expr[Any]) : Expr[Unit]
+  def ret(v : Expr[Any]) : Expr[Unit]
+
+  def push(v : Expr[Any]) : Expr[Unit]
+  def pop : Expr[Any]
 }
 
 trait MakeSequenceContext[Seq[_]] {
@@ -98,9 +82,49 @@ object PolyParse {
     }}
   }
 
-  /*def makeControlFlow(fn : Block[Unit,Unit] => Unit) : Expr[Unit] = {
-    
-  }*/
+  def makeControlFlowContext[Result:Type](fn : ControlFlowContext[Result] => Unit) : Expr[Result] = '{
+    import collection.mutable.ArrayStack
+    val stackPC : ArrayStack[Int] = new ArrayStack
+    val stack : ArrayStack[Any] = new ArrayStack
+    var pc : Int = 0
+    var arg : Any = null
+    var loop = true
+    while(loop) {
+      ${
+        import collection.mutable.ArrayBuffer
+        val blocks = new ArrayBuffer[(Int,Expr[Unit])]
+        fn(new {
+          type Label = Int
+          def block(f : Int => Expr[Unit]) : Int = {
+            val label = blocks.length
+            blocks.+=((label, f(label)))
+            label
+          }
+          def end(v : Expr[Result]) : Expr[Unit] = '{
+            arg = $v
+            loop = false
+          }
+          def call(label : Int, ret : Int, a : Expr[Any]) : Expr[Unit] = '{
+            pc = ${label.toExpr}
+            arg = $a
+            stackPC.push(${ret.toExpr})
+          }
+          def ret(v : Expr[Any]) : Expr[Unit] = '{
+            pc = stackPC.pop
+            arg = $v
+          }
+          def push(v : Expr[Any]) : Expr[Unit] = '{
+            stack.push($v)
+          }
+          def pop : Expr[Any] = '{ stack.pop }
+        })
+        blocks.foldRight[Expr[Unit]]('{ ??? })((pair, rest) => pair match {
+          case (i, block) => '{if pc == ${i.toExpr} then $block else $rest}
+        })
+      }
+    }
+    arg.asInstanceOf[Result]
+  }
 
   def compile[T:Type,ET:Type,Seq[_]:MakeSequenceContext](g : Grammar[Unit,T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
     def findRecursions[AT,T,ET](g : Grammar[AT,T,ET]) : Set[Grammar[_,_,_]] = g match {
