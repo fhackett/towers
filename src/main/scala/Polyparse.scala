@@ -15,6 +15,7 @@ private case class Terminal[T:Type:Liftable](val v : T) extends Grammar[Unit,T,T
 }
 private case class ArgumentTerminal[T:Type]() extends Grammar[T,T,T]
 private case class ArgToVal[T:Type]() extends Grammar[T,T,Any]
+private case class ReadPos() extends Grammar[Unit,Int,Any]
 private case class Call[AT1:Type,AT2:Type,T:Type,ET:Type](val arg : Grammar[AT1,AT2,ET], val fn : Grammar[AT2,T,ET]) extends Grammar[AT1,T,ET]
 private case class Sequence[LAT:Type,RAT:Type,LT:Type,RT:Type,ET:Type](val left : Grammar[LAT,LT,ET], val right : Grammar[RAT,RT,ET]) extends Grammar[(LAT,RAT),(LT,RT),ET]
 private case class Check[AT:Type,ET:Type](val g : Grammar[AT,Any,ET]) extends Grammar[AT,Unit,ET]
@@ -28,17 +29,19 @@ private class Recursion[AT:Type,T:Type,ET:Type](_g : =>Grammar[AT,T,ET]) extends
 
 trait SequenceContext[ET:Type] {
   type Mark
-  def mark() : Expr[Mark]
+  def mark : Expr[Mark]
   def restore(m : Expr[Mark]) : Expr[Unit]
-  def peek() : Expr[ET]
-  def isEOF() : Expr[Boolean]
-  def next() : Expr[Unit]
+  def peek : Expr[ET]
+  def isEOF : Expr[Boolean]
+  def next : Expr[Unit]
 }
 
 trait ControlFlowContext[Result] {
-  type Label
+  type Label = Int
 
-  def block(fn : Label => Expr[Unit]) : Label
+  def block(e : Expr[Unit]) : Label = block(_ => e)
+  def block(fn : Label=>Expr[Unit]) : Label
+  def reg[T:Type] : Expr[T]
 
   def end(v : Expr[Result]) : Expr[Unit]
 
@@ -51,6 +54,59 @@ trait ControlFlowContext[Result] {
 
 trait MakeSequenceContext[Seq[_]] {
   def makeCtx[ET:Type,Result:Type](fn : SequenceContext[ET] => Expr[Result]) : Expr[Seq[ET] => Result]
+}
+
+case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET], flowCtx : ControlFlowContext[Option[Result]],
+  recursions : Set[Grammar[_,_,_]], recMap : Map[AnyRef,flowCtx.Label]) {
+  def handleRec[AT:Type,T:Type](g : Grammar[AT,T,ET], arg : Expr[AT], yes : Expr[T]=>Expr[Unit], no : Expr[Unit]) : Expr[Unit] = {
+    if recursions.contains(g) then {
+      val recLabel = flowCtx.block(recLabel => {
+        this.copy(recMap=recMap.+((g, recLabel))).computeValue(g, flowCtx.reg[AT], flowCtx.ret(_), flowCtx.end('{None}))
+      })
+      val retLabel = flowCtx.block(yes(flowCtx.reg[T]))
+      flowCtx.call(recLabel, retLabel, arg)
+    } else {
+      computeValue(g, arg, yes, no)
+    }
+  }
+  def computeValue[AT:Type,T:Type](g : Grammar[AT,T,ET], arg : Expr[AT], yes : Expr[T]=>Expr[Unit], no : Expr[Unit]) : Expr[Unit] = g match {
+    case t@Terminal(v) => {
+      implicit val _ = t.liftable
+      '{
+        if ${seqCtx.isEOF} then $no else {
+          val curr = ${seqCtx.peek}
+          if curr == ${v.toExpr}
+          then {
+            ${seqCtx.next}
+            ${yes('{curr})}
+          } else $no
+        }
+      }
+    }
+    case Disjunction(l,r) => {
+      '{ // this is eager disjunction, TODO "correct" backtracking disjunction option
+        if ${speculateReachable(l, arg)}
+        then ${computeValue(l, arg, yes, no)}
+        else ${computeValue(r, arg, yes, no)}
+      }
+    }
+    case r : Recursion[AT,T,ET] => {
+      val retLabel = flowCtx.block(yes(flowCtx.reg[T]))
+      flowCtx.call(recMap(r.g), retLabel, arg)
+    }
+    case _ => ???
+  }
+  def speculateReachable[AT:Type,T:Type](g : Grammar[AT,T,ET], arg : Expr[AT]) : Expr[Boolean] = g match {
+    case t@Terminal(v) => {
+      implicit val _ = t.liftable
+      '{ !${seqCtx.isEOF} && ${seqCtx.peek} == ${v.toExpr}}
+    }
+    case Disjunction(l,r) => '{ ${speculateReachable(l, arg)} || ${speculateReachable(r, arg)} }
+    case r : Recursion[AT,T,ET] => speculateReachable(r.g, arg) // speculate past calls to avoid redundantly calling parser we know will fail
+                                                                // note: this only works if the parser terminates :) ... maybe catch obvious
+                                                                // non-termination later
+    case _ => ???
+  }
 }
 
 object PolyParse {
@@ -73,11 +129,11 @@ object PolyParse {
       var list = list_
       ${fn(new {
         type Mark = List[ET]
-        def mark() : Expr[Mark] = '{ list }
+        def mark : Expr[Mark] = '{ list }
         def restore(m : Expr[List[ET]]) : Expr[Unit] = '{ list = $m } // replace with Mark once Dotty devs fix
-        def peek() : Expr[ET] = '{ list.head }
-        def isEOF() : Expr[Boolean] = '{ list.isEmpty }
-        def next() : Expr[Unit] = '{ list = list.tail }
+        def peek : Expr[ET] = '{ list.head }
+        def isEOF : Expr[Boolean] = '{ list.isEmpty }
+        def next : Expr[Unit] = '{ list = list.tail }
       })}
     }}
   }
@@ -95,11 +151,12 @@ object PolyParse {
         val blocks = new ArrayBuffer[(Int,Expr[Unit])]
         fn(new {
           type Label = Int
-          def block(f : Int => Expr[Unit]) : Int = {
+          def block(f : Int=>Expr[Unit]) : Int = {
             val label = blocks.length
             blocks.+=((label, f(label)))
             label
           }
+          def reg[T:Type] : Expr[T] = '{arg.asInstanceOf[T]}
           def end(v : Expr[Result]) : Expr[Unit] = '{
             arg = $v
             loop = false
@@ -131,63 +188,19 @@ object PolyParse {
       case Terminal(_) => Set.empty
       case Sequence(a,b) => findRecursions(a) | findRecursions(b)
       case Disjunction(a,b) => findRecursions(a) | findRecursions(b)
-      //case Condition(a,_) => findRecursions(a)
-      //case PutValue(_) => Set.empty
-      //case TakeValue(a,_,b) => findRecursions(a) | findRecursions(b)
-      //case Mapping(a,_) => findRecursions(a)
       case r : Recursion[AT,T,ET] => Set(r.g)
+      case _ => ???
     }
     val recursions = findRecursions(g)
     println(recursions)
 
-    implicitly[MakeSequenceContext[Seq]].makeCtx(ctx => {
-      def handleRec[AT:Type,T:Type](g : Grammar[AT,T,ET], recMap : Map[AnyRef,Expr[Option[Any]]]) : Expr[Option[T]] = {
-        if recursions.contains(g) then '{
-          def rec() : Option[T] = ${codegen(g, recMap.+((g, '{rec()})))}
-          rec()
-        } else '{
-          ${codegen(g, recMap)}
-        }
-      }
-      def codegen[AT:Type,T:Type](g : Grammar[AT,T,ET], recMap : Map[AnyRef,Expr[Option[Any]]]) : Expr[Option[T]] = g match {
-        case t@Terminal(v) => {
-          implicit val liftable = t.liftable
-          '{
-            if !(${ctx.isEOF()}) then {
-              val p = ${ctx.peek()}
-              if p == ${v.toExpr} then {
-                ${ctx.next()}
-                Some(p)
-              } else None
-            } else None
-          }
-        }
-        case Sequence(a,b) => {
-          implicit val at = a.tType
-          implicit val aat = a.aType
-          implicit val bt = b.tType
-          implicit val abt = b.aType
-          '{ 
-            ${handleRec(a, recMap)}.flatMap(v1 => ${handleRec(b, recMap)}.map(v2 => (v1, v2)))
-          }
-        }
-        case Disjunction(a,b) => '{
-          ${handleRec(a, recMap)}.orElse(${handleRec(b, recMap)})
-        }
-        /*case Condition(a,cond) => '{
-          ($handleRec(a, recMap)).flatMap(v => if $cond('(v)) then Some(v) else None)
-        }*/
-        //case PutValue(v) => '{ None } // FIXME 
-        //case TakeValue(a,v,b) => '{ None } // FIXME 
-        /*case Mapping(a,fn) => {
-          implicit val at = a.tType
-          '{
-            ($handleRec(a, recMap)).map(v => $fn('(v)))
-          }
-        }*/
-        case r : Recursion[AT,T,ET] => recMap.get(r.g).get.asInstanceOf[Expr[Option[T]]]
-      }
-      handleRec(g, Map.empty)
+    implicitly[MakeSequenceContext[Seq]].makeCtx(seqCtx => {
+      makeControlFlowContext[Option[T]](flowCtx => {
+        flowCtx.block(root => {
+          val compiler = BlockCompiler(seqCtx, flowCtx, recursions, Map.empty.+((g, root)))
+          compiler.handleRec(g, '{()}, res => flowCtx.end('{Some($res)}), flowCtx.end('{None}))
+        })
+      })
     })
   }
 
@@ -197,7 +210,7 @@ object PolyParse {
       val v : Grammar[Unit,Int,Int] = term(1) <|> v
       val v2 : Grammar[(Unit,Unit),(Int,Int),Int] = (term(1) ++ term(2)) <|> v2
     }
-    compile(vv.v).show
+    compile[Int,Int,List](vv.v).show
   }
 }
 
