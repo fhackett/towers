@@ -41,7 +41,8 @@ trait ControlFlowContext[Result] {
 
   def block(e : Expr[Unit]) : Label = block(_ => e)
   def block(fn : Label=>Expr[Unit]) : Label
-  def reg[T:Type] : Expr[T]
+  def callReg[T:Type] : Expr[T]
+  def retReg[T:Type] : Expr[T]
 
   def end(v : Expr[Result]) : Expr[Unit]
 
@@ -61,9 +62,9 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET], flowCtx :
   def handleRec[AT:Type,T:Type](g : Grammar[AT,T,ET], arg : Expr[AT], yes : Expr[T]=>Expr[Unit], no : Expr[Unit]) : Expr[Unit] = {
     if recursions.contains(g) then {
       val recLabel = flowCtx.block(recLabel => {
-        this.copy(recMap=recMap.+((g, recLabel))).computeValue(g, flowCtx.reg[AT], flowCtx.ret(_), flowCtx.end('{None}))
+        this.copy(recMap=recMap.+((g, recLabel))).computeValue(g, flowCtx.callReg[AT], flowCtx.ret(_), flowCtx.end('{None}))
       })
-      val retLabel = flowCtx.block(yes(flowCtx.reg[T]))
+      val retLabel = flowCtx.block(yes(flowCtx.retReg[T]))
       flowCtx.call(recLabel, retLabel, arg)
     } else {
       computeValue(g, arg, yes, no)
@@ -84,15 +85,17 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET], flowCtx :
       }
     }
     case Disjunction(l,r) => {
+      val lv = computeValue(l, arg, yes, no)
+      val rv = computeValue(r, arg, yes, no)
       '{ // this is eager disjunction, TODO "correct" backtracking disjunction option
         if ${speculateReachable(l, arg)}
-        then ${computeValue(l, arg, yes, no)}
-        else ${computeValue(r, arg, yes, no)}
+        then ${lv}
+        else ${rv}
       }
     }
     case r : Recursion[AT,T,ET] => {
-      val retLabel = flowCtx.block(yes(flowCtx.reg[T]))
-      flowCtx.call(recMap(r.g), retLabel, arg)
+      val retLabel = flowCtx.block(yes(flowCtx.retReg[T]))
+      flowCtx.call(recMap.get(r.g).get, retLabel, arg)
     }
     case _ => ???
   }
@@ -143,7 +146,8 @@ object PolyParse {
     val stackPC : ArrayStack[Int] = new ArrayStack
     val stack : ArrayStack[Any] = new ArrayStack
     var pc : Int = 0
-    var arg : Any = null
+    var callReg_ : Any = null
+    var retReg_ : Any = null
     var loop = true
     while(loop) {
       ${
@@ -153,22 +157,24 @@ object PolyParse {
           type Label = Int
           def block(f : Int=>Expr[Unit]) : Int = {
             val label = blocks.length
-            blocks.+=((label, f(label)))
+            blocks += null
+            blocks(label) = (label, f(label))
             label
           }
-          def reg[T:Type] : Expr[T] = '{arg.asInstanceOf[T]}
+          def callReg[T:Type] : Expr[T] = '{callReg_.asInstanceOf[T]}
+          def retReg[T:Type] : Expr[T] = '{retReg_.asInstanceOf[T]}
           def end(v : Expr[Result]) : Expr[Unit] = '{
-            arg = $v
+            retReg_ = $v
             loop = false
           }
           def call(label : Int, ret : Int, a : Expr[Any]) : Expr[Unit] = '{
             pc = ${label.toExpr}
-            arg = $a
+            callReg_ = $a
             stackPC.push(${ret.toExpr})
           }
           def ret(v : Expr[Any]) : Expr[Unit] = '{
             pc = stackPC.pop
-            arg = $v
+            retReg_ = $v
           }
           def push(v : Expr[Any]) : Expr[Unit] = '{
             stack.push($v)
@@ -180,7 +186,7 @@ object PolyParse {
         })
       }
     }
-    arg.asInstanceOf[Result]
+    retReg_.asInstanceOf[Result]
   }
 
   def compile[T:Type,ET:Type,Seq[_]:MakeSequenceContext](g : Grammar[Unit,T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
@@ -204,13 +210,13 @@ object PolyParse {
     })
   }
 
-  def runTest = {
+  def main(argv : Array[String]) : Unit = {
     import scala.quoted.Toolbox.Default._
     object vv {
-      val v : Grammar[Unit,Int,Int] = term(1) <|> v
+      val v : Grammar[Unit,Int,Int] = term(1) <|> term(2) <|> v 
       val v2 : Grammar[(Unit,Unit),(Int,Int),Int] = (term(1) ++ term(2)) <|> v2
     }
-    compile[Int,Int,List](vv.v).show
+    println(compile[Int,Int,List](vv.v).show)
   }
 }
 
