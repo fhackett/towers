@@ -137,22 +137,24 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET]) {
       ))
     ) ++ computeBlocks(l) ++ computeBlocks(r)
     case Sequence(l, r) => {
-      implicit val _ = l.tType
-      implicit val _1 = r.tType
-      type LT = l.t
-      type RT = r.t
-      Seq(
-        (g, SeqIR(
-          PreserveArgIR(CallIR[AT,LT](l)),
-          SeqIR(
-            PreserveArgIR(SeqIR(
-              SimpleIR[(AT,LT),AT](ctx => ctx.succeed('{${ctx.arg} match { case (in,_) => in }})),
-              CallIR[AT,RT](r)
-            )),
-            SimpleIR[((AT,LT),RT),(LT,RT)](ctx => ctx.succeed('{${ctx.arg} match { case ((_,res1),res2) => (res1,res2) }}))
-          )
-        )),
-      ) ++ computeBlocks(l) ++ computeBlocks(r)
+      // this bizarre construct is a workaround to lampepfl/dotty#6142
+      def fn[LT:Type,RT:Type](ll : Grammar[AT,LT,ET], rr : Grammar[AT,RT,ET]) = {
+        val l = ll
+        val r = rr
+        Seq(
+          (g, SeqIR(
+            PreserveArgIR(CallIR[AT,LT](l)),
+            SeqIR(
+              PreserveArgIR(SeqIR(
+                SimpleIR[(AT,LT),AT](ctx => ctx.succeed('{${ctx.arg} match { case (in,_) => in }})),
+                CallIR[AT,RT](r)
+              )),
+              SimpleIR[((AT,LT),RT),(LT,RT)](ctx => ctx.succeed('{${ctx.arg} match { case ((_,res1),res2) => (res1,res2) }}))
+            )
+          )),
+        ) ++ computeBlocks(l) ++ computeBlocks(r)
+      }
+      fn(l,r)(l.tType,r.tType)
     }
     case Call(arg, fn) => {
       implicit val _ = arg.tType
