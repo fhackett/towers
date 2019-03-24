@@ -228,55 +228,6 @@ object PolyParse {
     }}
   }
 
-
-  def makeControlFlowContext[Result:Type](fn : ControlFlowContext[Result] => Unit) : Expr[Result] = '{
-    import collection.mutable.ArrayStack
-    val stackPC : ArrayStack[Int] = new ArrayStack
-    val stack : ArrayStack[Any] = new ArrayStack
-    var pc : Int = 0
-    var callReg_ : Any = null
-    var retReg_ : Any = null
-    var loop = true
-    while(loop) {
-      ${
-        import collection.mutable.ArrayBuffer
-        val blocks = new ArrayBuffer[(Int,Expr[Unit])]
-        fn(new {
-          type Label = Int
-          def block(f : Int=>Expr[Unit]) : Int = {
-            val label = blocks.length
-            blocks += null
-            blocks(label) = (label, f(label))
-            label
-          }
-          def callReg[T:Type] : Expr[T] = '{callReg_.asInstanceOf[T]}
-          def retReg[T:Type] : Expr[T] = '{retReg_.asInstanceOf[T]}
-          def end(v : Expr[Result]) : Expr[Unit] = '{
-            retReg_ = $v
-            loop = false
-          }
-          def call(label : Int, ret : Int, a : Expr[Any]) : Expr[Unit] = '{
-            pc = ${label.toExpr}
-            callReg_ = $a
-            stackPC.push(${ret.toExpr})
-          }
-          def ret(v : Expr[Any]) : Expr[Unit] = '{
-            pc = stackPC.pop
-            retReg_ = $v
-          }
-          def push(v : Expr[Any]) : Expr[Unit] = '{
-            stack.push($v)
-          }
-          def pop : Expr[Any] = '{ stack.pop }
-        })
-        blocks.foldRight[Expr[Unit]]('{ ??? })((pair, rest) => pair match {
-          case (i, block) => '{if pc == ${i.toExpr} then $block else $rest}
-        })
-      }
-    }
-    retReg_.asInstanceOf[Result]
-  }
-
   def performInlining(blocks : Seq[(AnyRef,BlockIR[_,_])]) : Seq[(AnyRef,BlockIR[_,_])] = blocks // FIXME: actually do it
 
   def splitBasicBlocks[In:Type,Out:Type](b : BlockIR[In,Out], rest : BlockIR2[Out]) : (BlockIR2[In],Seq[(AnyRef,BlockIR2[_])]) = b match {
