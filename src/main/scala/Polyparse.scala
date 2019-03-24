@@ -40,8 +40,8 @@ trait BlockContext[In:Type,-Out:Type] {
   def succeed(v : Expr[Out]) : Expr[Unit]
 }
 
-case class BranchIR[In:Type,Out:Type](val condition : BlockContext[In,Out] => Expr[Boolean], val yes : BlockIR[In,Out], val no : BlockIR[In,Out]) extends BlockIR[In,Out]
-case class IBranchIR[In:Type,Out:Type](val condition : BlockContext[In,Out] => Expr[Boolean], val yes : BlockContext[In,Out] => Expr[Unit], val no : BlockContext[In,Out] => Expr[Unit]) extends BlockIR[In,Out] 
+case class BranchIR[In:Type,Out:Type](val condition : Expr[In] => Expr[Boolean], val yes : BlockIR[In,Out], val no : BlockIR[In,Out]) extends BlockIR[In,Out]
+case class IBranchIR[In:Type,Out:Type](val condition : Expr[In] => Expr[Boolean], val yes : BlockContext[In,Out] => Expr[Unit], val no : BlockContext[In,Out] => Expr[Unit]) extends BlockIR[In,Out] 
 case class PreserveArgIR[In:Type,Out:Type](val g : BlockIR[In,Out]) extends BlockIR[In,(In,Out)] // produces a tuple of original arg and g's result
 case class SeqIR[In:Type,Mid:Type,Out:Type](val from : BlockIR[In,Mid], val to : BlockIR[Mid,Out]) extends BlockIR[In,Out] // makes result of from arg of to
 case class CallIR[In:Type,Out:Type](val key : AnyRef) extends BlockIR[In,Out]
@@ -53,7 +53,7 @@ sealed trait BlockIR2[In:Type] {
   type in = In
 }
 
-case class BranchIR2[In:Type](val condition : BlockContext[In,Any] => Expr[Boolean], val yes : BlockIR2[In], val no : BlockIR2[In]) extends BlockIR2[In]
+case class BranchIR2[In:Type](val condition : Expr[In] => Expr[Boolean], val yes : BlockIR2[In], val no : BlockIR2[In]) extends BlockIR2[In]
 case class BeforeIR2[In:Type,In2:Type](val map : BlockContext[In,In2] => Expr[Unit], val next : BlockIR2[In2]) extends BlockIR2[In]
 case class CallIR2[In:Type](val key : AnyRef, val ret : AnyRef) extends BlockIR2[In]
 case class JumpIR2[In:Type](val Key : AnyRef) extends BlockIR2[In]
@@ -133,7 +133,7 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET]) {
     )
     case Disjunction(l, r) => Seq(
       (g, BranchIR[AT,T](
-        condition=ctx => speculateReachable(l, ctx.arg),
+        condition=arg => speculateReachable(l, arg),
         yes=CallIR[AT,T](l),
         no=CallIR[AT,T](r),
       ))
@@ -233,9 +233,24 @@ object PolyParse {
   def splitBasicBlocks[In:Type,Out:Type](b : BlockIR[In,Out], rest : BlockIR2[Out]) : (BlockIR2[In],Seq[(AnyRef,BlockIR2[_])]) = b match {
     case IBranchIR(condition,yes,no) => {
       (BeforeIR2[In,Out](ctx => '{
-        if ${condition(ctx)}
-        then ${yes(ctx)}
-        else ${no(ctx)}
+        var out : Out = null.asInstanceOf[Out]
+        var success = true
+        ${
+          // avoid pasting the "rest" into both branches of the conditional
+          val nctx : BlockContext[In,Out] = new {
+            def arg = ctx.arg
+            def fail = '{ success = false }
+            def succeed(v : Expr[Out]) = '{ out = ${v} }
+          }
+          '{
+            if ${condition(ctx.arg)}
+            then ${yes(nctx)}
+            else ${no(nctx)}
+            if success
+            then ${ctx.succeed('{out})}
+            else ${ctx.fail}
+          }
+        }
       }, rest), Seq())
     }
     case BranchIR(condition,yes,no) => {
@@ -299,11 +314,7 @@ object PolyParse {
             def codegen[In:Type](b : BlockIR2[In], argument : Expr[In]) : Expr[Unit] = b match {
               case BranchIR2(condition,yes,no) => '{
                 //println("condition")
-                if ${condition(new {
-                  def arg = argument
-                  def fail = ???
-                  def succeed(e : Expr[Any]) = ???
-                })}
+                if ${condition(argument)}
                 then ${codegen(yes,argument)}
                 else ${codegen(no,argument)}
               }
