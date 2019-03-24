@@ -198,6 +198,25 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET]) {
   }
 }
 
+case class BlockInliner(blockMap : Map[AnyRef,BlockIR[_,_]], reachable : Set[AnyRef], inboundCounts : Map[AnyRef,Int]) {
+  def inliningTransform[In,Out](b : BlockIR[In,Out]) : BlockIR[In,Out] = b match {
+    case CallIR(key) => {
+      if (inboundCounts(key) == 1)
+      then blockMap(key).asInstanceOf[BlockIR[In,Out]]
+      else b
+    }
+    case RecoverIR(left,right) =>
+      RecoverIR(inliningTransform(left), inliningTransform(right))(left.tIn,left.tOut)
+    case BranchIR(condition,left,right) =>
+      BranchIR(condition, inliningTransform(left), inliningTransform(right))(left.tIn,left.tOut)
+    case SeqIR(left,right) =>
+      SeqIR(inliningTransform(left), inliningTransform(right))(left.tIn,left.tOut,right.tOut)
+    case SimpleIR(_) => b
+    case IBranchIR(_,_,_) => b
+    case PreserveArgIR(b) => PreserveArgIR(inliningTransform(b))(b.tIn,b.tOut)
+  }
+}
+
 object PolyParse {
 
   private def maybeRecurse[AT:Type,T:Type,ET:Type](g : =>Grammar[AT,T,ET]) : Grammar[AT,T,ET] = if g == null then new Recursion(g) else g
@@ -228,7 +247,57 @@ object PolyParse {
     }}
   }
 
-  def performInlining(blocks : Seq[(AnyRef,BlockIR[_,_])]) : Seq[(AnyRef,BlockIR[_,_])] = blocks // FIXME: actually do it
+  def summingCombine(a : Map[AnyRef,Int], b : Map[AnyRef,Int]) : Map[AnyRef,Int] =
+    a.foldLeft(b)((acc, tpl) => {
+      val (k,v) = tpl
+      if acc.contains(k) then acc.updated(k, acc(k)+v) else acc.updated(k,v)
+    })
+
+  def calculateInboundCounts(b : BlockIR[_,_], map : Map[AnyRef,BlockIR[_,_]], visited : Set[AnyRef]) : (Map[AnyRef,Int],Set[AnyRef]) =
+    b match {
+      case CallIR(key) =>
+        if visited.contains(key)
+        then (Map(key -> 1), visited)
+        else {
+          val (counts, vis) = calculateInboundCounts(map(key), map, visited+key)
+          (summingCombine(Map(key -> 1), counts), vis)
+        }
+      case RecoverIR(left,right) => {
+        val (counts1, vis1) = calculateInboundCounts(left, map, visited)
+        val (counts2, vis2) = calculateInboundCounts(right, map, vis1)
+        (summingCombine(counts1,counts2), vis2)
+      }
+      case BranchIR(_,left,right) => {
+        val (counts1, vis1) = calculateInboundCounts(left, map, visited)
+        val (counts2, vis2) = calculateInboundCounts(right, map, vis1)
+        (summingCombine(counts1,counts2), vis2)
+      }
+      case SeqIR(left,right) => {
+        val (counts1, vis1) = calculateInboundCounts(left, map, visited)
+        val (counts2, vis2) = calculateInboundCounts(right, map, vis1)
+        (summingCombine(counts1,counts2), vis2)
+      }
+      case SimpleIR(_) => (Map(), visited)
+      case IBranchIR(_,_,_) => (Map(), visited)
+      case PreserveArgIR(b) => calculateInboundCounts(b, map, visited)
+    }
+
+  def performInlining(blocks : Seq[(AnyRef,BlockIR[_,_])]) : Seq[(AnyRef,BlockIR[_,_])] = {
+    val blockMap = blocks.toMap
+    val (rootKey, root) = blocks.head
+    val (inboundCounts_, reachableSet) = calculateInboundCounts(root, blockMap, Set(rootKey))
+    val inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts_)
+    val inliner : BlockInliner = BlockInliner(blockMap, reachableSet, inboundCounts)
+    val inlinedBlocks = blocks.map(kv => kv match {
+      case (key, b) => (key, inliner.inliningTransform(b))
+    })
+    val (_, root2) = inlinedBlocks.head
+    val (_, reachableSet2) = calculateInboundCounts(root2, blockMap, Set(rootKey))
+    val prunedBlocks = inlinedBlocks.filter(kv => kv match {
+      case (key, _) => reachableSet2(key)
+    })
+    prunedBlocks
+  }
 
   def splitBasicBlocks[In:Type,Out:Type](b : BlockIR[In,Out], rest : BlockIR2[Out]) : (BlockIR2[In],Seq[(AnyRef,BlockIR2[_])]) = b match {
     case IBranchIR(condition,yes,no) => {
@@ -379,13 +448,13 @@ object PolyParse {
   def main(argv : Array[String]) : Unit = {
     import scala.quoted.Toolbox.Default._
     object vv {
-      val v : Grammar[Unit,Int,Int] = term(1) <|> term(2) 
+      val v : Grammar[Unit,Int,Int] = term(1) <|> term(2) <|> v
       val v2 : Grammar[Unit,(Int,Int),Int] = (term(1) ++ term(2)) <|> v2
     }
     val expr = compile[Int,Int,List](vv.v)
     println(expr.show)
     val parser = expr.run
-    println(parser(List()))
+    //println(parser(List()))
     println(parser(List(1)))
     println(parser(List(2)))
   }
