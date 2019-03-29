@@ -421,14 +421,14 @@ object PolyParse {
       val compiler = BlockCompiler(seqCtx)
       val blocks = compiler.computeBlocks(g)
       val inlinedBlocks = performInlining(blocks)
-      val basicBlocks : List[(AnyRef,BlockIR2[_])] = List(inlinedBlocks : _*).flatMap(block => {
+      val basicBlocks : List[(AnyRef,BlockIR2[_])] = inlinedBlocks.toList.flatMap(block => {
         val (key,b) = block
         implicit val _ = b.tIn
         implicit val _1 = b.tOut
         val (root, basics) = splitBasicBlocks(b, ReturnIR2())
         List((key,root)) ++ basics
       })
-      val pcMap = basicBlocks.zipWithIndex.map(tpl => (tpl._1._1,tpl._2)).toMap[AnyRef,Int]
+      val pcMap = basicBlocks.map(_._1).zipWithIndex.toMap[AnyRef,Int]
       '{
         var stackPC : List[Int] = Nil
         var stackData : List[Any] = Nil
