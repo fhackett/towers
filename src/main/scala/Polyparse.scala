@@ -201,7 +201,7 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET]) {
       ) ++ computeBlocks(from)
     }
     case r : Recursion[AT,T,ET] => Seq((g, CallIR[AT,T](r.g)))
-    case _ => ???
+    case _ => ??? // TODO: argtoval, readpos, check
   }
 }
 
