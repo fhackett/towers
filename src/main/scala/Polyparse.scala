@@ -32,6 +32,8 @@ private class Recursion[AT:Type,T:Type,ET:Type](_g : =>Grammar[AT,T,ET]) extends
 sealed trait BlockIR[In:Type,Out:Type] {
   val tIn = implicitly[Type[In]]
   val tOut = implicitly[Type[Out]]
+  type in = In
+  type out = Out
 }
 
 trait BlockContext[In:Type,-Out:Type] {
@@ -41,7 +43,6 @@ trait BlockContext[In:Type,-Out:Type] {
 }
 
 case class BranchIR[In:Type,Out:Type](val condition : Expr[In] => Expr[Boolean], val yes : BlockIR[In,Out], val no : BlockIR[In,Out]) extends BlockIR[In,Out]
-case class IBranchIR[In:Type,Out:Type](val condition : Expr[In] => Expr[Boolean], val yes : BlockContext[In,Out] => Expr[Unit], val no : BlockContext[In,Out] => Expr[Unit]) extends BlockIR[In,Out] 
 case class PreserveArgIR[In:Type,Out:Type](val g : BlockIR[In,Out]) extends BlockIR[In,(In,Out)] // produces a tuple of original arg and g's result
 case class SeqIR[In:Type,Mid:Type,Out:Type](val from : BlockIR[In,Mid], val to : BlockIR[Mid,Out]) extends BlockIR[In,Out] // makes result of from arg of to
 case class CallIR[In:Type,Out:Type](val key : AnyRef) extends BlockIR[In,Out]
@@ -58,6 +59,12 @@ case class BeforeIR2[In:Type,In2:Type](val map : BlockContext[In,In2] => Expr[Un
 case class CallIR2[In:Type](val key : AnyRef, val ret : AnyRef) extends BlockIR2[In]
 case class JumpIR2[In:Type](val Key : AnyRef) extends BlockIR2[In]
 case class ReturnIR2[In:Type]() extends BlockIR2[In]
+case class PushArgIR2[In:Type](val b : BlockIR2[In]) extends BlockIR2[In]
+case class PopArgIR2[In:Type,Arg:Type](val b : BlockIR2[(Arg,In)]) extends BlockIR2[In] {
+  val tArg = implicitly[Type[Arg]]
+  type arg = Arg
+}
+case class PushRecoverIR2[In:Type](val failKey : AnyRef, val b : BlockIR2[In]) extends BlockIR2[In]
 
 trait SequenceContext[ET:Type] {
   type Mark
@@ -212,7 +219,6 @@ case class BlockInliner(blockMap : Map[AnyRef,BlockIR[_,_]], reachable : Set[Any
     case SeqIR(left,right) =>
       SeqIR(inliningTransform(left), inliningTransform(right))(left.tIn,left.tOut,right.tOut)
     case SimpleIR(_) => b
-    case IBranchIR(_,_,_) => b
     case PreserveArgIR(b) => PreserveArgIR(inliningTransform(b))(b.tIn,b.tOut)
   }
 }
@@ -278,7 +284,6 @@ object PolyParse {
         (summingCombine(counts1,counts2), vis2)
       }
       case SimpleIR(_) => (Map(), visited)
-      case IBranchIR(_,_,_) => (Map(), visited)
       case PreserveArgIR(b) => calculateInboundCounts(b, map, visited)
     }
 
@@ -299,33 +304,73 @@ object PolyParse {
     prunedBlocks
   }
 
-  def splitBasicBlocks[In:Type,Out:Type](b : BlockIR[In,Out], rest : BlockIR2[Out]) : (BlockIR2[In],Seq[(AnyRef,BlockIR2[_])]) = b match {
-    case IBranchIR(condition,yes,no) => {
-      (BeforeIR2[In,Out](ctx => '{
-        var out : Out = null.asInstanceOf[Out]
-        var success = true
-        ${
-          // avoid pasting the "rest" into both branches of the conditional
-          val nctx : BlockContext[In,Out] = new {
-            def arg = ctx.arg
-            def fail = '{ success = false }
-            def succeed(v : Expr[Out]) = '{ out = ${v} }
-          }
-          '{
-            if ${condition(ctx.arg)}
-            then ${yes(nctx)}
-            else ${no(nctx)}
-            if success
-            then ${ctx.succeed('{out})}
-            else ${ctx.fail}
-          }
+  def containsJumps[In,Out](b : BlockIR[In,Out]) : Boolean = b match {
+    case BranchIR(condition, yes, no) => containsJumps(yes) || containsJumps(no)
+    case SeqIR(left,right) => containsJumps(left) || containsJumps(right)
+    case CallIR(_) => true
+    case SimpleIR(_) => false
+    case PreserveArgIR(bb) => containsJumps(bb)
+    case RecoverIR(yes,no) => true
+  }
+
+  def compileJumplessBlock[In:Type,Out:Type](b : BlockIR[In,Out], ctx : BlockContext[In,Out]) : Expr[Unit] = b match {
+    case BranchIR(condition, yes, no) => '{
+      var out : Out = null.asInstanceOf[Out]
+      var success = true
+      ${
+        // avoid pasting the "rest" into both branches of the conditional
+        val nctx : BlockContext[In,Out] = new {
+          def arg = ctx.arg
+          def fail = '{ success = false }
+          def succeed(v : Expr[Out]) = '{ out = ${v} }
         }
-      }, rest), Seq())
+        '{
+          if ${condition(ctx.arg)}
+          then ${compileJumplessBlock(yes,nctx)}
+          else ${compileJumplessBlock(no,nctx)}
+          if success
+          then ${ctx.succeed('{out})}
+          else ${ctx.fail}
+        }
+      }
     }
+    case SeqIR(left,right) => {
+      implicit val e1 = right.tIn
+      compileJumplessBlock(left, new {
+        def arg = ctx.arg
+        def fail = ctx.fail
+        def succeed(v : Expr[right.in]) = compileJumplessBlock(right, new {
+          def arg = v
+          def fail = ctx.fail
+          def succeed(v : Expr[Out]) = ctx.succeed(v)
+        })
+      })
+    }
+    case CallIR(_) => ??? // this is a jumpless block, so should be unreachable
+    case SimpleIR(fn) => fn(ctx)
+    case PreserveArgIR(bb) => {
+      implicit val e1 = bb.tOut
+      '{
+        val holdArg = ${ctx.arg}
+        ${compileJumplessBlock(bb, new BlockContext[In,bb.out]() {
+          def arg = '{ holdArg }
+          def fail = ctx.fail
+          def succeed(v : Expr[bb.out]) = ctx.succeed('{ (holdArg, ${v}) })
+        })}
+      }
+    }
+    case RecoverIR(_,_) => ??? // can't inline the non-local recovery part
+  }
+
+  def splitBasicBlocks[In:Type,Out:Type](b : BlockIR[In,Out], rest : BlockIR2[Out]) : (BlockIR2[In],Seq[(AnyRef,BlockIR2[_])]) = b match {
     case BranchIR(condition,yes,no) => {
-      val (yBlock, yBlocks) = splitBasicBlocks(yes,JumpIR2(rest))
-      val (nBlock, nBlocks) = splitBasicBlocks(no,JumpIR2(rest))
-      (BranchIR2[In](condition,yBlock,nBlock), Seq((rest,rest)) ++ yBlocks ++ nBlocks)
+      if (containsJumps(yes) || containsJumps(no)) then {
+        val (yBlock, yBlocks) = splitBasicBlocks(yes,JumpIR2(rest))
+        val (nBlock, nBlocks) = splitBasicBlocks(no,JumpIR2(rest))
+        (BranchIR2[In](condition,yBlock,nBlock), Seq((rest,rest)) ++ yBlocks ++ nBlocks)
+      } else {
+        (BeforeIR2[In,Out](ctx => compileJumplessBlock(b, ctx), rest), Seq())
+      }
     }
     case SeqIR(left,right) => {
       implicit val _ = left.tOut
@@ -344,7 +389,21 @@ object PolyParse {
     case SimpleIR(fn) => {
       (BeforeIR2[In,Out](fn, rest), Seq())
     }
-    case _ => ??? // TODO: preserveArg, recover
+    case PreserveArgIR(bb) => {
+      type BBout = bb.out
+      implicit val e1 = bb.tOut
+      if (containsJumps(bb)) then {
+        val (block, otherBlocks) = splitBasicBlocks(bb, PopArgIR2[BBout,In](rest))
+        (PushArgIR2(block), otherBlocks)
+      } else {
+        (BeforeIR2[In,(In,BBout)](ctx => compileJumplessBlock(b, ctx), rest), Seq())
+      }
+    }
+    case RecoverIR(successPath, failPath) => {
+      val (successBlock, successBlocks) = splitBasicBlocks(successPath, JumpIR2(rest))
+      val (failBlock, failBlocks) = splitBasicBlocks(failPath, JumpIR2(rest))
+      (PushRecoverIR2(failBlock, successBlock), Seq((failBlock,failBlock), (rest,rest)) ++ successBlocks ++ failBlocks)
+    }
   }
 
   def compile[T:Type,ET:Type,Seq[_]:MakeSequenceContext](g : Grammar[Unit,T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
@@ -374,7 +433,8 @@ object PolyParse {
       }) : _*)
       '{
         var stackPC : List[Int] = Nil
-        //val stack : ArrayStack[Any] = new ArrayStack
+        var stackData : List[Any] = Nil
+        var stackRecover : List[(Int,Any,List[Int],List[Any])] = Nil
         var pc : Int = 0
         var register : Any = null
         var loop = true
@@ -392,8 +452,20 @@ object PolyParse {
                   def arg = a
                   def fail = '{
                     //println("fail")
-                    loop = false
-                    register = null
+                    stackRecover match {
+                      case Nil => {
+                        loop = false
+                        register = null
+                      }
+                      case hd :: tl => {
+                        val (rpc, rreg, rstackPC, rstackData) = hd
+                        pc = rpc
+                        register = rreg
+                        stackPC = rstackPC
+                        stackData = rstackData
+                        stackRecover = tl
+                      }
+                    }
                   }
                   def succeed(v : Expr[In2]) = '{
                     val result = ${v}
@@ -424,6 +496,26 @@ object PolyParse {
                     stackPC = tl
                   }
                 }
+              }
+              case PushArgIR2(bb) => '{
+                val pushedArg = ${argument}
+                stackData = pushedArg :: stackData
+                ${codegen(bb, '{pushedArg})}
+              }
+              case pop@PopArgIR2(bb) => {
+                implicit val e1 = pop.tArg
+                type TA = pop.arg
+                '{
+                  val (stackTop :: stackTail) = stackData // fails if stack is empty, should never happen
+                  val poppedArg = (stackTop.asInstanceOf[TA], ${argument})
+                  stackData = stackTail
+                  ${codegen(bb, '{poppedArg})}
+                }
+              }
+              case PushRecoverIR2(failKey, bb) => '{
+                val pushedArg = ${argument}
+                stackRecover = (${pcMap(failKey).toExpr}, pushedArg, stackPC, stackData) :: stackRecover
+                ${codegen(bb, '{pushedArg})}
               }
             }
             basicBlocks.foldRight[Expr[Unit]]('{???})((tpl, otherwise) => tpl match {
