@@ -428,9 +428,7 @@ object PolyParse {
         val (root, basics) = splitBasicBlocks(b, ReturnIR2())
         List((key,root)) ++ basics
       })
-      val pcMap = Map[AnyRef,Int](basicBlocks.zipWithIndex.map(t => t match {
-        case ((key,_),idx) => (key, idx)
-      }) : _*)
+      val pcMap = basicBlocks.zipWithIndex.map(tpl => (tpl._1._1,tpl._2)).toMap[AnyRef,Int]
       '{
         var stackPC : List[Int] = Nil
         var stackData : List[Any] = Nil
