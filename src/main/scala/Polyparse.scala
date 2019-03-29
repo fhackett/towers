@@ -205,7 +205,7 @@ case class BlockCompiler[ET:Type,Result](seqCtx : SequenceContext[ET]) {
   }
 }
 
-case class BlockInliner(blockMap : Map[AnyRef,BlockIR[_,_]], reachable : Set[AnyRef], inboundCounts : Map[AnyRef,Int]) {
+case class BlockInliner(blockMap : Map[AnyRef,BlockIR[_,_]], inboundCounts : Map[AnyRef,Int]) {
   def inliningTransform[In,Out](b : BlockIR[In,Out]) : BlockIR[In,Out] = b match {
     case CallIR(key) => {
       if (inboundCounts(key) == 1)
@@ -288,19 +288,33 @@ object PolyParse {
     }
 
   def performInlining(blocks : Seq[(AnyRef,BlockIR[_,_])]) : Seq[(AnyRef,BlockIR[_,_])] = {
-    val blockMap = blocks.toMap
-    val (rootKey, root) = blocks.head
-    val (inboundCounts_, reachableSet) = calculateInboundCounts(root, blockMap, Set(rootKey))
-    val inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts_)
-    val inliner : BlockInliner = BlockInliner(blockMap, reachableSet, inboundCounts)
-    val inlinedBlocks = blocks.map(kv => kv match {
-      case (key, b) => (key, inliner.inliningTransform(b))
-    })
-    val (_, root2) = inlinedBlocks.head
-    val (_, reachableSet2) = calculateInboundCounts(root2, blockMap, Set(rootKey))
-    val prunedBlocks = inlinedBlocks.filter(kv => kv match {
-      case (key, _) => reachableSet2(key)
-    })
+    var (rootKey, root) = blocks.head
+    
+    var blockMap = blocks.toMap
+    var blocksToInline = blocks
+    var (inboundCounts, reachableSet) = calculateInboundCounts(root, blockMap, Set(rootKey))
+    inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
+    var shouldInline = true
+    while(shouldInline) {
+      val inliner : BlockInliner = BlockInliner(blockMap, inboundCounts)
+      val inlinedBlocks = blocksToInline.map(kv => kv match {
+        case (key, b) => (key, inliner.inliningTransform(b))
+      })
+
+      blockMap = inlinedBlocks.toMap
+      root = inlinedBlocks.head._2;
+      {
+        val countInfo = calculateInboundCounts(root, blockMap, Set(rootKey))
+        inboundCounts = countInfo._1; reachableSet = countInfo._2
+      }
+      inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
+
+      shouldInline = inboundCounts.exists((k,v) => k != rootKey && v == 1)
+      blocksToInline = inlinedBlocks
+    }
+
+    val prunedBlocks = blocksToInline.filter(pair => reachableSet(pair._1))
+    print("pruned: "); println(prunedBlocks.map(_._2))
     prunedBlocks
   }
 
@@ -421,6 +435,7 @@ object PolyParse {
       val compiler = BlockCompiler(seqCtx)
       val blocks = compiler.computeBlocks(g)
       val inlinedBlocks = performInlining(blocks)
+      println(inlinedBlocks)
       val basicBlocks : List[(AnyRef,BlockIR2[_])] = inlinedBlocks.toList.flatMap(block => {
         val (key,b) = block
         implicit val _ = b.tIn
