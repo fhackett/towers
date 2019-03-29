@@ -253,7 +253,7 @@ object PolyParse {
     }}
   }
 
-  def traverseGraph[NodeType](root : NodeType, getNext : NodeType => Seq[NodeType]) : (Map[Any,Int], Map[Any,Int], Set[Any]) = {
+  def traverseGraph[NodeType](root : NodeType, getNext : NodeType => Seq[NodeType]) : (Map[NodeType,Int], Map[NodeType,Int], Set[NodeType]) = {
     import collection.mutable.{ArrayStack,HashMap,HashSet}
     val visitStack = new ArrayStack[NodeType]()
     val inboundCounts = new HashMap[NodeType,Int]()
@@ -279,59 +279,26 @@ object PolyParse {
     (inboundCounts.toMap, outboundCounts.toMap, visited.toSet)
   }
 
-  def summingCombine(a : Map[AnyRef,Int], b : Map[AnyRef,Int]) : Map[AnyRef,Int] =
-    a.foldLeft(b)((acc, tpl) => {
-      val (k,v) = tpl
-      if acc.contains(k) then acc.updated(k, acc(k)+v) else acc.updated(k,v)
-    })
-
-  def calculateInboundCounts(b : BlockIR[_,_], map : Map[AnyRef,BlockIR[_,_]], visited : Set[AnyRef]) : (Map[AnyRef,Int],Set[AnyRef]) =
-    b match {
-      case CallIR(key) =>
-        if visited.contains(key)
-        then (Map(key -> 1), visited)
-        else {
-          val (counts, vis) = calculateInboundCounts(map(key), map, visited+key)
-          (summingCombine(Map(key -> 1), counts), vis)
-        }
-      case RecoverIR(left,right) => {
-        val (counts1, vis1) = calculateInboundCounts(left, map, visited)
-        val (counts2, vis2) = calculateInboundCounts(right, map, vis1)
-        (summingCombine(counts1,counts2), vis2)
-      }
-      case BranchIR(_,left,right) => {
-        val (counts1, vis1) = calculateInboundCounts(left, map, visited)
-        val (counts2, vis2) = calculateInboundCounts(right, map, vis1)
-        (summingCombine(counts1,counts2), vis2)
-      }
-      case SeqIR(left,right) => {
-        val (counts1, vis1) = calculateInboundCounts(left, map, visited)
-        val (counts2, vis2) = calculateInboundCounts(right, map, vis1)
-        (summingCombine(counts1,counts2), vis2)
-      }
-      case SimpleIR(_) => (Map(), visited)
-      case PreserveArgIR(b) => calculateInboundCounts(b, map, visited)
-    }
-
   def performInlining(blocks : Seq[(AnyRef,BlockIR[_,_])]) : Seq[(AnyRef,BlockIR[_,_])] = {
-    var (rootKey, root) = blocks.head
+    val (rootKey, _) = blocks.head
     
     var blockMap = blocks.toMap
-    var (inboundCounts, reachableSet) = calculateInboundCounts(root, blockMap, Set(rootKey))
-    inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
+
+    def getNext[In,Out](b : BlockIR[In,Out]) : Seq[AnyRef] = b match {
+      case CallIR(key) => Seq(key)
+      case RecoverIR(left,right) => getNext(left) ++ getNext(right)
+      case BranchIR(_,left,right) => getNext(left) ++ getNext(right)
+      case SeqIR(left,right) => getNext(left) ++ getNext(right)
+      case SimpleIR(_) => Seq()
+      case PreserveArgIR(bb) => getNext(bb)
+    }
+    val (inboundCounts, _, _) = traverseGraph(rootKey, k => getNext(blockMap(k)))
 
     val inliner : BlockInliner = BlockInliner(blockMap, inboundCounts)
-    val inlinedBlocks = blocks.map(kv => kv match {
-      case (key, b) => (key, inliner.inliningTransform(b))
-    })
+    val inlinedBlocks = blocks.map(kv => (kv._1, inliner.inliningTransform(kv._2)))
 
     blockMap = inlinedBlocks.toMap
-    root = inlinedBlocks.head._2
-    ;{
-      val countInfo = calculateInboundCounts(root, blockMap, Set(rootKey))
-      inboundCounts = countInfo._1; reachableSet = countInfo._2
-    }
-    inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
+    val (_,_,reachableSet) = traverseGraph(rootKey, k => getNext(blockMap(k)))
 
     val prunedBlocks = inlinedBlocks.filter(pair => reachableSet(pair._1))
     prunedBlocks
