@@ -209,7 +209,7 @@ case class BlockInliner(blockMap : Map[AnyRef,BlockIR[_,_]], inboundCounts : Map
   def inliningTransform[In,Out](b : BlockIR[In,Out]) : BlockIR[In,Out] = b match {
     case CallIR(key) => {
       if (inboundCounts(key) == 1)
-      then blockMap(key).asInstanceOf[BlockIR[In,Out]]
+      then inliningTransform(blockMap(key).asInstanceOf[BlockIR[In,Out]])
       else b
     }
     case RecoverIR(left,right) =>
@@ -253,6 +253,32 @@ object PolyParse {
     }}
   }
 
+  def traverseGraph[NodeType](root : NodeType, getNext : NodeType => Seq[NodeType]) : (Map[Any,Int], Map[Any,Int], Set[Any]) = {
+    import collection.mutable.{ArrayStack,HashMap,HashSet}
+    val visitStack = new ArrayStack[NodeType]()
+    val inboundCounts = new HashMap[NodeType,Int]()
+    val outboundCounts = new HashMap[NodeType,Int]()
+    val visited = new HashSet[NodeType]()
+    visitStack.push(root)
+    inboundCounts.put(root,1)
+    while(!visitStack.isEmpty) {
+      val curr = visitStack.pop()
+      val pushed = new HashSet[NodeType]()
+      visited.add(curr)
+      getNext(curr).foreach(n => {
+        inboundCounts.put(n, inboundCounts.getOrElse(n,0) + 1)
+        outboundCounts.put(curr, outboundCounts.getOrElse(curr,0) + 1)
+        if(!visited(n) && !pushed(n)) then {
+          visitStack.push(n)
+          pushed.add(n)
+        } else {
+          // discard
+        }
+      })
+    }
+    (inboundCounts.toMap, outboundCounts.toMap, visited.toSet)
+  }
+
   def summingCombine(a : Map[AnyRef,Int], b : Map[AnyRef,Int]) : Map[AnyRef,Int] =
     a.foldLeft(b)((acc, tpl) => {
       val (k,v) = tpl
@@ -291,30 +317,23 @@ object PolyParse {
     var (rootKey, root) = blocks.head
     
     var blockMap = blocks.toMap
-    var blocksToInline = blocks
     var (inboundCounts, reachableSet) = calculateInboundCounts(root, blockMap, Set(rootKey))
     inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
-    var shouldInline = true
-    while(shouldInline) {
-      val inliner : BlockInliner = BlockInliner(blockMap, inboundCounts)
-      val inlinedBlocks = blocksToInline.map(kv => kv match {
-        case (key, b) => (key, inliner.inliningTransform(b))
-      })
 
-      blockMap = inlinedBlocks.toMap
-      root = inlinedBlocks.head._2;
-      {
-        val countInfo = calculateInboundCounts(root, blockMap, Set(rootKey))
-        inboundCounts = countInfo._1; reachableSet = countInfo._2
-      }
-      inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
+    val inliner : BlockInliner = BlockInliner(blockMap, inboundCounts)
+    val inlinedBlocks = blocks.map(kv => kv match {
+      case (key, b) => (key, inliner.inliningTransform(b))
+    })
 
-      shouldInline = inboundCounts.exists((k,v) => k != rootKey && v == 1)
-      blocksToInline = inlinedBlocks
+    blockMap = inlinedBlocks.toMap
+    root = inlinedBlocks.head._2
+    ;{
+      val countInfo = calculateInboundCounts(root, blockMap, Set(rootKey))
+      inboundCounts = countInfo._1; reachableSet = countInfo._2
     }
+    inboundCounts = summingCombine(Map(rootKey -> 1), inboundCounts)
 
-    val prunedBlocks = blocksToInline.filter(pair => reachableSet(pair._1))
-    print("pruned: "); println(prunedBlocks.map(_._2))
+    val prunedBlocks = inlinedBlocks.filter(pair => reachableSet(pair._1))
     prunedBlocks
   }
 
@@ -420,6 +439,68 @@ object PolyParse {
     }
   }
 
+  def inlineBasicBlocks(blocks : Seq[(AnyRef,BlockIR2[_])]) : Seq[(AnyRef,BlockIR2[_])] = {
+    var blockMap = blocks.toMap
+    val (rootKey,_) = blocks.head
+    def getNext[In](b : BlockIR2[In]) : Seq[AnyRef] = b match {
+      case BranchIR2(_,yes,no) => getNext(yes) ++ getNext(no)
+      case BeforeIR2(_,bb) => getNext(bb)
+      case JumpIR2(key) => Seq(key)
+      case CallIR2(key,ret) => Seq(key,ret)
+      case PushArgIR2(bb) => getNext(bb)
+      case PopArgIR2(bb) => getNext(bb)
+      case PushRecoverIR2(failKey,bb) => Seq(failKey) ++ getNext(bb)
+      case ReturnIR2() => Seq()
+    }
+    var (inboundCounts, outboundCounts, reachableSet) =
+      traverseGraph(rootKey, k => getNext(blockMap(k)))
+
+    def inlineBlock[In](b : BlockIR2[In]) : BlockIR2[In] = {
+      implicit val e1 = b.tIn
+      b match {
+        case BranchIR2(condition,yes,no) => BranchIR2(condition,inlineBlock(yes),inlineBlock(no))
+        case BeforeIR2(fn,bb) => {
+          implicit val e2 = bb.tIn
+          BeforeIR2(fn,inlineBlock(bb))
+        }
+        case JumpIR2(key) => if (inboundCounts(key) == 1) then {
+          inlineBlock(blockMap(key).asInstanceOf[BlockIR2[In]])
+        } else {
+          blockMap(key) match {
+            // same as CallIR2, don't bother jumping to a block that's just another jump
+            case JumpIR2(key2) => inlineBlock(JumpIR2(key2))
+            // don't bother jumping to another block that's just a return
+            case ReturnIR2() => ReturnIR2()
+            case _ => b
+          }
+        }
+        case CallIR2(key,ret) => blockMap(ret) match {
+          // if we're returning to a plain jump, just return to that jump
+          // (and then try to do the optimisation again until we run out of
+          // daisy-chained jumps)
+          case JumpIR2(ret2) => inlineBlock(CallIR2(key,ret2))
+          case _ => CallIR2(key,ret)
+        }
+        case PushArgIR2(bb) => PushArgIR2(inlineBlock(bb))
+        case pop@PopArgIR2(bb) => {
+          implicit val e2 = pop.tArg
+          PopArgIR2(inlineBlock(bb))
+        }
+        case PushRecoverIR2(failKey,bb) => PushRecoverIR2(failKey,inlineBlock(bb))
+        case ReturnIR2() => b
+      }
+    }
+
+    val inlinedBlocks = blocks.map(kv => (kv._1, inlineBlock(kv._2)))
+    blockMap = inlinedBlocks.toMap
+    ;{
+      val (i,o,r) = traverseGraph(rootKey, k => getNext(blockMap(k)))
+      inboundCounts = i; outboundCounts = o; reachableSet = r
+    }
+    val prunedBlocks = inlinedBlocks.filter(kv => reachableSet(kv._1))
+    prunedBlocks
+  }
+
   def compile[T:Type,ET:Type,Seq[_]:MakeSequenceContext](g : Grammar[Unit,T,ET])(implicit seqT : Type[Seq[T]]) : Expr[Seq[ET] => Option[T]] = {
     def findRecursions[AT,T,ET](g : Grammar[AT,T,ET]) : Set[Grammar[_,_,_]] = g match {
       case Terminal(_) => Set.empty
@@ -435,7 +516,6 @@ object PolyParse {
       val compiler = BlockCompiler(seqCtx)
       val blocks = compiler.computeBlocks(g)
       val inlinedBlocks = performInlining(blocks)
-      println(inlinedBlocks)
       val basicBlocks : List[(AnyRef,BlockIR2[_])] = inlinedBlocks.toList.flatMap(block => {
         val (key,b) = block
         implicit val _ = b.tIn
@@ -443,7 +523,8 @@ object PolyParse {
         val (root, basics) = splitBasicBlocks(b, ReturnIR2())
         List((key,root)) ++ basics
       })
-      val pcMap = basicBlocks.map(_._1).zipWithIndex.toMap[AnyRef,Int]
+      val inlinedBasicBlocks = inlineBasicBlocks(basicBlocks)
+      val pcMap = inlinedBasicBlocks.map(_._1).zipWithIndex.toMap[AnyRef,Int]
       '{
         var stackPC : List[Int] = Nil
         var stackData : List[Any] = Nil
@@ -531,7 +612,7 @@ object PolyParse {
                 ${codegen(bb, '{pushedArg})}
               }
             }
-            basicBlocks.foldRight[Expr[Unit]]('{???})((tpl, otherwise) => tpl match {
+            inlinedBasicBlocks.foldRight[Expr[Unit]]('{???})((tpl, otherwise) => tpl match {
               case (key, b) => {
                 def fn[TI:Type](b : BlockIR2[TI]) = '{
                   if pc == ${pcMap(key).toExpr}
