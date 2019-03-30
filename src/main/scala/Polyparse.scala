@@ -1,7 +1,7 @@
 package polyparse
 
 import scala.quoted._
-//import scala.quoted.Toolbox.Default._
+import scala.annotation.tailrec
 
 
 sealed trait Grammar[AT:Type,T:Type,ET:Type] {
@@ -65,6 +65,7 @@ case class PopArgIR2[In:Type,Arg:Type](val b : BlockIR2[(Arg,In)]) extends Block
   type arg = Arg
 }
 case class PushRecoverIR2[In:Type](val failKey : AnyRef, val b : BlockIR2[In]) extends BlockIR2[In]
+case class TailRecIR2[In:Type]() extends BlockIR2[In]
 
 trait SequenceContext[ET:Type] {
   type Mark
@@ -409,33 +410,35 @@ object PolyParse {
   def inlineBasicBlocks(blocks : Seq[(AnyRef,BlockIR2[_])]) : Seq[(AnyRef,BlockIR2[_])] = {
     var blockMap = blocks.toMap
     val (rootKey,_) = blocks.head
-    def getNext[In](b : BlockIR2[In]) : Seq[AnyRef] = b match {
-      case BranchIR2(_,yes,no) => getNext(yes) ++ getNext(no)
-      case BeforeIR2(_,bb) => getNext(bb)
+    def getNext[In](self : AnyRef, b : BlockIR2[In]) : Seq[AnyRef] = b match {
+      case BranchIR2(_,yes,no) => getNext(self, yes) ++ getNext(self, no)
+      case BeforeIR2(_,bb) => getNext(self, bb)
       case JumpIR2(key) => Seq(key)
       case CallIR2(key,ret) => Seq(key,ret)
-      case PushArgIR2(bb) => getNext(bb)
-      case PopArgIR2(bb) => getNext(bb)
-      case PushRecoverIR2(failKey,bb) => Seq(failKey) ++ getNext(bb)
+      case PushArgIR2(bb) => getNext(self, bb)
+      case PopArgIR2(bb) => getNext(self, bb)
+      case PushRecoverIR2(failKey,bb) => Seq(failKey) ++ getNext(self, bb)
       case ReturnIR2() => Seq()
+      case TailRecIR2() => Seq(self)
     }
     var (inboundCounts, outboundCounts, reachableSet) =
-      traverseGraph(rootKey, k => getNext(blockMap(k)))
+      traverseGraph(rootKey, k => getNext(k, blockMap(k)))
 
-    def inlineBlock[In](b : BlockIR2[In]) : BlockIR2[In] = {
+    def inlineBlock[In](self : AnyRef, b : BlockIR2[In]) : BlockIR2[In] = {
       implicit val e1 = b.tIn
       b match {
-        case BranchIR2(condition,yes,no) => BranchIR2(condition,inlineBlock(yes),inlineBlock(no))
+        case BranchIR2(condition,yes,no) =>
+          BranchIR2(condition, inlineBlock(self, yes), inlineBlock(self, no))
         case BeforeIR2(fn,bb) => {
           implicit val e2 = bb.tIn
-          BeforeIR2(fn,inlineBlock(bb))
+          BeforeIR2(fn, inlineBlock(self, bb))
         }
         case JumpIR2(key) => if (inboundCounts(key) == 1) then {
-          inlineBlock(blockMap(key).asInstanceOf[BlockIR2[In]])
+          inlineBlock(self, blockMap(key).asInstanceOf[BlockIR2[In]])
         } else {
           blockMap(key) match {
             // same as CallIR2, don't bother jumping to a block that's just another jump
-            case JumpIR2(key2) => inlineBlock(JumpIR2(key2))
+            case JumpIR2(key2) => inlineBlock(self, JumpIR2(key2))
             // don't bother jumping to another block that's just a return
             case ReturnIR2() => ReturnIR2()
             case _ => b
@@ -445,23 +448,31 @@ object PolyParse {
           // if we're returning to a plain jump, just return to that jump
           // (and then try to do the optimisation again until we run out of
           // daisy-chained jumps)
-          case JumpIR2(ret2) => inlineBlock(CallIR2(key,ret2))
+          case JumpIR2(ret2) => inlineBlock(self, CallIR2(key,ret2))
+          // if we're returning to a block that also returns, this maps to
+          // native Scala tail-call recursion
+          case ReturnIR2() => if (key == self) then {
+            TailRecIR2()
+          } else {
+            b
+          }
           case _ => CallIR2(key,ret)
         }
-        case PushArgIR2(bb) => PushArgIR2(inlineBlock(bb))
+        case PushArgIR2(bb) => PushArgIR2(inlineBlock(self, bb))
         case pop@PopArgIR2(bb) => {
           implicit val e2 = pop.tArg
-          PopArgIR2(inlineBlock(bb))
+          PopArgIR2(inlineBlock(self, bb))
         }
-        case PushRecoverIR2(failKey,bb) => PushRecoverIR2(failKey,inlineBlock(bb))
+        case PushRecoverIR2(failKey,bb) => PushRecoverIR2(failKey,inlineBlock(self, bb))
         case ReturnIR2() => b
+        case TailRecIR2() => b
       }
     }
 
-    val inlinedBlocks = blocks.map(kv => (kv._1, inlineBlock(kv._2)))
+    val inlinedBlocks = blocks.map(kv => (kv._1, inlineBlock(kv._1, kv._2)))
     blockMap = inlinedBlocks.toMap
     ;{
-      val (i,o,r) = traverseGraph(rootKey, k => getNext(blockMap(k)))
+      val (i,o,r) = traverseGraph(rootKey, k => getNext(k, blockMap(k)))
       inboundCounts = i; outboundCounts = o; reachableSet = r
     }
     val prunedBlocks = inlinedBlocks.filter(kv => reachableSet(kv._1))
@@ -501,12 +512,12 @@ object PolyParse {
         var loop = true
         while(loop) {
           ${
-            def codegen[In:Type](b : BlockIR2[In], argument : Expr[In]) : Expr[Unit] = b match {
+            def codegen[In:Type](b : BlockIR2[In], argument : Expr[In], selfRec : AnyRef) : Expr[Unit] = b match {
               case BranchIR2(condition,yes,no) => '{
                 //println("condition")
                 if ${condition(argument)}
-                then ${codegen(yes,argument)}
-                else ${codegen(no,argument)}
+                then ${codegen(yes,argument, selfRec)}
+                else ${codegen(no,argument, selfRec)}
               }
               case bef@BeforeIR2(map,next) => {
                 def fn[In:Type,In2:Type](a : Expr[In], bef : BeforeIR2[In,In2]) = bef.map(new {
@@ -531,7 +542,7 @@ object PolyParse {
                   def succeed(v : Expr[In2]) = '{
                     val result = ${v}
                     //print("succeed"); println(result)
-                    ${codegen(bef.next, '{result})}
+                    ${codegen(bef.next, '{result}, selfRec)}
                   }
                 })
                 fn(argument,bef)(implicitly[Type[In]],next.tIn)
@@ -561,7 +572,7 @@ object PolyParse {
               case PushArgIR2(bb) => '{
                 val pushedArg = ${argument}
                 stackData = pushedArg :: stackData
-                ${codegen(bb, '{pushedArg})}
+                ${codegen(bb, '{pushedArg}, selfRec)}
               }
               case pop@PopArgIR2(bb) => {
                 implicit val e1 = pop.tArg
@@ -570,23 +581,30 @@ object PolyParse {
                   val (stackTop :: stackTail) = stackData // fails if stack is empty, should never happen
                   val poppedArg = (stackTop.asInstanceOf[TA], ${argument})
                   stackData = stackTail
-                  ${codegen(bb, '{poppedArg})}
+                  ${codegen(bb, '{poppedArg}, selfRec)}
                 }
               }
               case PushRecoverIR2(failKey, bb) => '{
                 val pushedArg = ${argument}
                 stackRecover = (${pcMap(failKey).toExpr}, pushedArg, stackPC, stackData) :: stackRecover
-                ${codegen(bb, '{pushedArg})}
+                ${codegen(bb, '{pushedArg}, selfRec)}
               }
+              case TailRecIR2() => // TODO: this could be done with native Scala tail calls, but you can't splice them :(
+                '{ 
+                  register = ${argument}
+                  pc = ${pcMap(selfRec).toExpr} // this is redundant, pc should not have changed
+                  // skip all stack manipulation, tail calls don't need it
+                }
             }
             inlinedBasicBlocks.foldRight[Expr[Unit]]('{???})((tpl, otherwise) => tpl match {
               case (key, b) => {
-                def fn[TI:Type](b : BlockIR2[TI]) = '{
+                implicit val e1 = b.tIn
+                type TI = b.in
+                '{
                   if pc == ${pcMap(key).toExpr}
-                  then ${codegen(b,'{register.asInstanceOf[${b.tIn}]})}
+                  then ${codegen(b, '{register.asInstanceOf[TI]}, key)}
                   else ${otherwise}
                 }
-                fn(b)(b.tIn)
               }
             })
           }
