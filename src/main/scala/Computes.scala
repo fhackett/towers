@@ -1,196 +1,114 @@
-package polyparse.computes
+package towers.computes
 
 import scala.collection.mutable.{HashMap, HashSet}
 
 import quoted._
+import tasty._
 
 class ComputesKey()
 
-sealed abstract class Computes[Tp : Type](implicit val key : ComputesKey) {
+sealed abstract class Computes[Tp : Type] {
   type T = Tp
   val tType = implicitly[Type[T]]
+  val key = ComputesKey()
 }
 
-sealed abstract class RuntimeInstruction[+T]
-type FunctionType[-Arg,+Result] = Arg => RuntimeInstruction[Result]
+abstract class Computable[T : Type] extends Computes[T] {
+  def parts : List[Computes[_]]
+  def replace(parts : List[Computes[_]]) : Computable[T]
 
-case class ReturnInstruction[+T](val value : T) extends RuntimeInstruction[T]
-case class PushInstruction[+T,Arg,Result]
-                          (val push : FunctionType[Arg,Result], val tail : RuntimeInstruction[T])
-                          extends RuntimeInstruction[T]
+  def tryFold(parts : List[Computes[_]]) : Option[Computes[T]]
+  def flatten : Computes[T]
+}
+
+class ComputesIndirect[T : Type](c : =>Computes[T]) extends Computes[T] {
+  lazy val computes = c
+}
+
+class ComputesVar[T : Type]() extends Computes[T]
+
+class ComputesExpr[T : Type](val params : List[Computes[_]], val exprFn : List[Expr[_]] => Expr[T]) extends Computes[T]
 
 object Computes {
 
-  type C = Computes
+  implicit class ComputesFunction[Arg : Type, Result : Type](fn : Computes[Arg] => Computes[Result]) extends Computes[Arg=>Result] {
+    var arg = ComputesVar[Arg]() // mutable, or we can't implement mapBody
+    val body = fn(arg)
 
-  implicit def DefaultComputesKey : ComputesKey = ComputesKey()
-
-  def unapply[T](c : Computes[T]) : Option[Computable[T]] = c match {
-    case op : ComputesOpaque[T] => Some(op.computable)
-    case _ => None
+    def mapBody(fn : Computes[Result] => Computes[Result]) : ComputesFunction[Arg,Result] = {
+      val mapped = ComputesFunction[Arg,Result](_ => fn(body))
+      mapped.arg = arg
+      mapped
+    }
   }
 
-  def const[T : Type : Liftable](value : T) : Computes[T] = ComputesConst(value)
-  def function[Arg : Type, Result : Type](fn : Computes[Arg] => Computes[Result]) : Computes[FunctionType[Arg,Result]] = {
-    val v = new ComputesAbstract[Arg]{}
-    ComputesFunction(v, fn(v))
-  }
-
-  implicit class ComputesConst[T : Type : Liftable]
-                              (val value : T)
-                              (implicit key : ComputesKey)
-                              extends Computes[T]()(implicitly[Type[T]], key) {
-    val liftable = implicitly[Liftable[T]]
-  }
-
-  implicit class ComputesApplicableOps[Arg, Result : Type](fn : Computes[FunctionType[Arg,Result]]) {
-    def apply(arg : Computes[Arg]) : Computes[Result] =
-      ComputesApply(fn, arg)(arg.tType, implicitly[Type[Result]], implicitly[ComputesKey])
-  }
-
-  implicit class ComputesOps[T : Type](c : Computes[T]) {
-    def let[Result : Type](fn : Computes[T] => Computes[Result]) : Computes[Result] = 
-      function(fn).apply(c)
-  }
-
-  def expandOpaques[T](c : Computes[T], visited : HashSet[ComputesKey], indirects : HashMap[ComputesKey, Computes[_]]) : Computes[T] =
-    if visited(c.key) then
-      indirects(c.key).asInstanceOf[Computes[T]]
-    else {
-      visited += c.key
-      implicit val e1 = c.tType
-      val result : Computes[T] = c match {
-        case _ : ComputesConst[T] => c
-        case _ : ComputesAbstract[T] => c
-        case ComputesMap(from, fn) => {
-          implicit val e2 = from.tType
-          val from2 = expandOpaques(from, visited, indirects)
-          ComputesMap(from2, fn)
-        }
-        case ComputesFunction(arg, body) => {
-          implicit val e2 = arg.tType
-          implicit val e3 = body.tType
-          val body2 = expandOpaques(body, visited, indirects)
-          ComputesFunction(arg, body2)
-        }
-        case ComputesApply(fn, arg) => {
-          implicit val e2 = arg.tType
-          val fn2 = expandOpaques(fn, visited, indirects)
-          val arg2 = expandOpaques(arg, visited, indirects)
-          ComputesApply(fn2, arg2)
-        }
-        case ComputesSwitch(arg, cases, default) => {
-          implicit val e2 = arg.tType
-          val arg2 = expandOpaques(arg, visited, indirects)
-          val cases2 = cases.map(expandOpaques(_, visited, indirects))
-          val default2 = default.map(expandOpaques(_, visited, indirects))
-          ComputesSwitch(arg2, cases2, default2)
-        }
-        case ind : ComputesIndirect[T] => {
-          ComputesIndirect(expandOpaques(ind.computes, visited, indirects))
-        }
-        case op : ComputesOpaque[T] => {
-          val comp = op.computable.toComputes
-          expandOpaques(comp, visited, indirects)
+  def removeRedundantIndirects[T](computes : Computes[T]) : Computes[T] = {
+    val ingressCounts = HashMap[ComputesKey,Int]();
+    {
+      val visitedSet = HashSet[ComputesKey]()
+      visitedSet += computes.key
+      ingressCounts(computes.key) = 1
+      def countIngresses[T](computes : Computes[T]) : Unit = computes match {
+        case c : Computable[T] => c.parts.foreach(countIngresses(_))
+        case c : ComputesIndirect[T] =>
+          if !visitedSet(c.computes.key) then {
+            visitedSet += c.computes.key
+            ingressCounts(c.computes.key) = 1
+            countIngresses(c.computes)
+          } else {
+            ingressCounts(c.computes.key) = ingressCounts(c.computes.key) + 1
+          }
+        case c : ComputesVar[T] => ()
+        case c : ComputesExpr[T] => c.params.foreach(countIngresses(_))
+        case c : ComputesFunction[_,_] => countIngresses(c.body)
+      }
+      countIngresses(computes)
+    }
+    {
+      val visitedSet = HashSet[ComputesKey]()
+      val substitutions = HashMap[ComputesKey,Computes[_]]()
+      visitedSet += computes.key
+      def removeSingletonIndirects[T](computes : Computes[T]) : Computes[T] = {
+        implicit val e1 = computes.tType
+        computes match {
+          case c : Computable[T] => c.replace(c.parts.map(removeSingletonIndirects(_)))
+          case c : ComputesIndirect[T] =>
+            if !visitedSet(c.computes.key) then {
+              visitedSet += c.computes.key
+              if ingressCounts(c.computes.key) == 1 then {
+                removeSingletonIndirects(c.computes)
+              } else {
+                substitutions(c.computes.key) = removeSingletonIndirects(c.computes)
+                ComputesIndirect(substitutions(c.computes.key).asInstanceOf[Computes[T]])
+              }
+            } else {
+              ComputesIndirect(substitutions(c.computes.key).asInstanceOf[Computes[T]])
+            }
+          case c : ComputesVar[T] => c
+          case c : ComputesExpr[T] => ComputesExpr(c.params.map(removeSingletonIndirects(_)), c.exprFn)
+          case c : ComputesFunction[_,_] => c.mapBody(removeSingletonIndirects(_))
         }
       }
-      indirects += ((c.key, result))
-      result
-    }
-
-  def getComputesBlocks[T](c : Computes[T], visited : HashSet[ComputesKey]) : List[Computes[_]] =
-    if visited(c.key) then
-      List.empty
-    else {
-      visited += c.key
-      c match {
-        case _ : ComputesConst[T] => List.empty
-        case _ : ComputesAbstract[T] => List.empty
-        case ComputesMap(from, _) => getComputesBlocks(from, visited)
-        case ComputesFunction(_, body) =>
-          List(body) ++ getComputesBlocks(body, visited)
-        case ComputesApply(fn, arg) =>
-          getComputesBlocks(arg, visited) ++ getComputesBlocks(fn, visited)
-        case ComputesSwitch(arg, cases, default) => 
-          getComputesBlocks(arg, visited) ++
-          cases.flatMap(getComputesBlocks(_, visited)) ++
-          default.map(getComputesBlocks(_, visited)).getOrElse(List.empty)
-        case ind : ComputesIndirect[T] =>
-          List(ind) ++ getComputesBlocks(ind.computes, visited)
-        case op : ComputesOpaque[T] => ??? // opaques should be removed before getting blocks
-      }
-    }
-
-  def compileImpl[Arg,Result](c : Computes[FunctionType[Arg,Result]]) : Expr[Arg=>Result] = {
-
-    val flattened = expandOpaques(c, HashSet(), HashMap())
-    val blocks = getComputesBlocks(flattened, HashSet())
-
-    // TODO: pass to minimise indirects
-    ???
-    
-  }
-
-  implicit class ComputesFunctionCompiler[Arg,Result]
-                                         (self : Computes[FunctionType[Arg,Result]]) {
-    def compile : Expr[Arg=>Result] = compileImpl(self)
-  }
-
-  implicit class ComputesValueCompiler[T, A, R]
-                                      (self : Computes[T])
-                                      (implicit ev : implicits.Not[T <:< FunctionType[A,R]]) {
-    def compile : Expr[T] = {
-      implicit val e1 = self.tType
-      function[Unit,T](u => self).compile.apply('{()})
+      substitutions(computes.key) = removeSingletonIndirects(computes)
+      substitutions(computes.key).asInstanceOf[Computes[T]]
     }
   }
 
-  implicit class ComputesOpaque[T : Type]
-                               (val computable : Computable[T])
-                               (implicit key : ComputesKey)
-                               extends Computes[T]()(implicitly[Type[T]], key)
+  def reifyCall[Arg, Result](computes : Computes[Arg=>Result], arg : Expr[Arg])(implicit reflection: Reflection) = {
+    removeRedundantIndirects(computes)
+    '{ ??? }
+  }
 
-  implicit class ComputesPair[Left : Type, Right : Type]
-                                  (val pair: (Computes[Left], Computes[Right]))
-                                  (implicit key : ComputesKey)
-                                  extends Computes[(Left,Right)]()(implicitly[Type[(Left,Right)]], key)
+  // problem: even if the input expression is globally reachable, we can't tell here because of how
+  // parameters work... user has to re-write this one line anywhere they want to use this
+  /* implicit class ComputesFnCallCompiler[Arg, Result](inline computes : Computes[Arg=>Result]) {
+    inline def reifyCall(arg : Arg) : Result = ${ reifyCallImpl(computes, '{arg}) }
+  } */
+
 }
 
-import Computes._
+val add1 : Computes[Int=>Int] =
+  (i : Computes[Int]) => ComputesExpr(List(i), es => '{ ${ es(0).asInstanceOf[Expr[Int]] } + 1 })
 
-trait Computable[T] {
-  def toComputes : Computes[T]
-  def tryReduce : Option[Computes[T]]
-}
-
-sealed abstract class ComputesAbstract[T : Type]
-                                      (implicit key : ComputesKey)
-                                      extends Computes[T]()(implicitly[Type[T]], key)
-
-case class ComputesMap[From : Type, To : Type]
-                      (from : Computes[From], fn : Expr[From=>To])
-                      (implicit key : ComputesKey)
-                      extends Computes[To]()(implicitly[Type[To]], key)
-
-case class ComputesFunction[Arg : Type, Result : Type]
-                           (arg : ComputesAbstract[Arg], body : Computes[Result])
-                           (implicit key : ComputesKey)
-                           extends Computes[FunctionType[Arg,Result]]()(implicitly[Type[FunctionType[Arg,Result]]], key)
-
-case class ComputesApply[Arg : Type, Result : Type]
-                        (fn : Computes[FunctionType[Arg,Result]], arg : Computes[Arg])
-                        (implicit key : ComputesKey)
-                        extends Computes[Result]()(implicitly[Type[Result]], key)
-
-case class ComputesSwitch[Arg : Type, Result : Type]
-                         (arg : Computes[Arg], cases : List[Computes[Result]], default : Option[Computes[Result]])
-                         (implicit key : ComputesKey)
-                         extends Computes[Result]()(implicitly[Type[Result]], key)
-
-class ComputesIndirect[T : Type]
-                      (c : =>Computes[T])
-                      (implicit key : ComputesKey)
-                      extends Computes[T]()(implicitly[Type[T]], key) {
-  lazy val computes = c
-}
+inline def doAdd1(i : Int) : Int = ${ Computes.reifyCall(add1, '{i}) }
 
