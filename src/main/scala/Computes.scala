@@ -53,6 +53,8 @@ object Computes {
     var arg = ComputesVar[Arg]() // mutable, or we can't implement mapBody
     val body : Computes[Result] = fn(arg)
 
+    type AT = Arg
+
     def mapBody(fn : Computes[Result] => Computes[Result]) : ComputesFunction[Arg,Result] = {
       val mapped = ComputesFunction[Arg,Result](_ => fn(body))
       mapped.arg = arg
@@ -62,6 +64,35 @@ object Computes {
 
   implicit class ComputesApplicationOp[Arg : Type,Result : Type](fn : =>Computes[Arg=>Result]) {
     def apply(arg : Computes[Arg]) : Computes[Result] = ComputesApply(arg, fn)
+  }
+
+  def ensureTraversable[T](computes : Computes[T]) : Unit = {
+    val visitedSet = HashSet[ComputesKey]()
+    def impl[T](computes : Computes[T]) : Unit = computes match {
+      case c : Computable[T] => c.parts.foreach(impl(_))
+      case c : ComputesVar[T] => ()
+      case c : ComputesBinding[_,_] => {
+        impl(c.value)
+        impl(c.body)
+      }
+      case c : ComputesExpr[T] => c.params.foreach(impl(_))
+      case c : ComputesApply[_,T] => {
+        impl(c.argument)
+        if !visitedSet(c.function.key) then {
+          visitedSet += c.function.key
+          impl(c.function)
+        }
+      }
+      case c : ComputesSwitch[_,T] => {
+        impl(c.argument)
+        for((v, r) <- c.cases) {
+          impl(v)
+          impl(r)
+        }
+        c.default.foreach(impl(_))
+      }
+      case c : ComputesFunction[_,_] => impl(c.body)
+    }
   }
 
   def removeRedundantIndirects[T](computes : Computes[T]) : Computes[T] = {
@@ -177,7 +208,8 @@ object Computes {
       }
       visitedSet += computes.key
       val result = removeSingletonIndirects(computes)
-      substitutions(result.key) = result
+      substitutions(computes.key) = result
+      ensureTraversable(result)
       result
     }
   }
@@ -452,31 +484,153 @@ object Computes {
     result
   }
 
-  def getBlocks[T](computes : Computes[T]) : List[Computes[_]] = {
-    ???
+  def getBlocks[T](computes : Computes[T]) : List[ComputesFunction[_,_]] = {
+    val visitedSet = HashSet[ComputesKey]()
+    val blocks = ArrayBuffer[ComputesFunction[_,_]]()
+    def impl[T](computes : Computes[T]) : Unit = computes match {
+      case c : Computable[T] => ???
+      case c : ComputesVar[T] => ()
+      case c : ComputesBinding[_,T] => {
+        impl(c.value)
+        impl(c.body)
+      }
+      case c : ComputesExpr[T] => c.params.foreach(impl(_))
+      case c : ComputesApply[_,T] => {
+        impl(c.argument)
+        if !visitedSet(c.function.key) then {
+          visitedSet += c.function.key
+          impl(c.function)
+        }
+      }
+      case c : ComputesSwitch[_,T] => {
+        impl(c.argument)
+        for((v,r) <- c.cases) {
+          impl(v)
+          impl(r)
+        }
+        c.default.foreach(impl(_))
+      }
+      case c : ComputesFunction[_,_] => {
+        blocks += c
+        impl(c.body)
+      }
+    }
+    visitedSet += computes.key
+    // assume top-level Computes is a function literal ... be very confused if it isn't
+    // this assumption means that impl will pick it up immediately and find everything else via its body
+    impl(computes)
+    blocks.toList
   }
 
-  def codegenBlock[T](computes : Computes[T], pcMap : Map[ComputesKey,Int]) : Expr[Tuple=>T] = {
-    ???
+  def codegenBlock[A,R](computes : ComputesFunction[A,R], pcMap : Map[ComputesKey,Int], arg : Expr[A], closure : Expr[Array[Any]],
+                      pushStack : Expr[(Int,Array[Any])]=>Expr[Unit])
+                     (implicit reflection : Reflection): Expr[Any] = {
+    import reflection._
+    def impl[T](computes : Computes[T], vMap : Map[ComputesKey,Expr[Any]]) : Expr[Any] = computes match {
+      case c : Computable[T] => ???
+      case c : ComputesVar[T] => vMap(c.key).asInstanceOf[Expr[T]]
+      case c : ComputesBinding[_,T] => {
+        implicit val e1 = c.value.tType
+        '{
+          val binding = ${ impl(c.value, vMap) }
+          ${ impl(c.body, vMap + ((c.name.key, '{ binding }))) }
+        }
+      }
+      case c : ComputesExpr[T] => {
+        def proc(inP : List[Computes[_]], outP : List[Expr[_]]) : Expr[T] = inP match {
+          case Nil => c.exprFn(outP)
+          case hd :: tl => {
+            implicit val e1 = computes.tType
+            implicit val e2 = hd.tType
+            '{
+              val exprParam = ${ impl(hd, vMap).asInstanceOf[Expr[hd.T]] }
+              ${ proc(tl, outP ++ List('{ exprParam })) }
+            }
+          }
+        }
+        proc(c.params, Nil)
+      }
+      case c : ComputesApply[_,T] => {
+        '{
+          val fn = ${ impl(c.function, vMap).asInstanceOf[Expr[(Int,Array[Any])]] }
+          ${ pushStack('{ fn }) }
+          ${ impl(c.argument, vMap) }
+        }
+      }
+      case c : ComputesSwitch[_,T] => {
+        val arg = impl(c.argument, vMap)
+        Match(
+          arg.unseal,
+          (for((v,r) <- c.cases)
+            yield CaseDef(
+              Pattern.Value(impl(v, vMap).unseal),
+              None,
+              impl(r, vMap).unseal))
+          ++ c.default.map(d =>
+              List({
+                // our unsuspecting branch donor, from whom we will steal the default branch
+                val bloodSacrifice = '{ ${ arg } match { case _ => ${ impl(d, vMap) } } }
+                bloodSacrifice.unseal match {
+                  case IsInlined(inl) => { // strip off an Inlined node that gets in our way
+                    inl.body match {
+                      case IsMatch(m) => {
+                        m.cases.head // if you can't make, it steal it...
+                                     // this is a terrible trick that should probably be replaced
+                      }
+                    }
+                  }
+                }
+              })).getOrElse(Nil)).seal
+      }
+      case c : ComputesFunction[_,_] => {
+        '{ ( ${ pcMap(c.key).toExpr }, null ) } // FIXME: actually generate closures
+      }
+    }
+    impl(computes.body, Map(computes.arg.key -> arg))
   }
 
   def reifyCall[Arg : Type, Result : Type](computes : Computes[Arg=>Result], arg : Expr[Arg])
                                           (implicit reflection: Reflection) = {
-    removeRedundantIndirects(computes)
-    val pcMap = HashMap[ComputesKey,Int]()
+    val inlinedComputes = removeRedundantIndirects(computes)
+    val flattenedComputes = flatten(inlinedComputes)
+    val reboundComputes = inferBindings(flattenedComputes)
+    val complexifiedComputes = complexify(reboundComputes)
+
+    val rootKey = complexifiedComputes.key
+
+    val blocks = getBlocks(complexifiedComputes)
+
+    println(blocks)
+    val pcMap = blocks.zipWithIndex.map((block, idx) => (block.key, idx)).toMap
     import reflection._
-    '{
-      val stack = ArrayStack[(Int,Tuple)]()
+    val expr = '{
+      val stack = ArrayStack[(Int,Array[Any])]()
+      stack.push((${ pcMap(rootKey).toExpr }, null))
       var reg : Any = ${ arg }
-      var iterate = true
-      var pc : Int = ${ pcMap(computes.key).toExpr }
-      do {
-        ${
-          ???
-        };
-      } while(iterate);
+      while(!stack.isEmpty) {
+        val (pc, closure) = stack.pop
+        reg = ${
+          Match(
+            '{ pc }.unseal,
+            blocks.map(block => {
+              implicit val e1 = block.arg.tType
+              type AT = block.AT // avoid bug? block.arg.T does not work
+              CaseDef(
+                Pattern.Value(Literal(Constant.Int(pcMap(block.key)))),
+                None,
+                codegenBlock(
+                  block,
+                  pcMap,
+                  '{ reg.asInstanceOf[AT] },
+                  '{ closure },
+                  (fn => '{ stack.push( ${ fn } ) })).unseal)
+            })).seal
+        }
+      }
       reg.asInstanceOf[Result]
     }
+    println(expr.show) // DEBUG
+    expr
   }
 
   // problem: even if the input expression is globally reachable, we can't tell here because of how
@@ -490,5 +644,14 @@ object Computes {
 val add1 : Computes[Int=>Int] =
   (i : Computes[Int]) => ComputesExpr(List(i), es => '{ ${ es(0).asInstanceOf[Expr[Int]] } + 1 })
 
-inline def doAdd1(i : Int) : Int = ${ Computes.reifyCall(add1, '{i}) }
+val countdown : Computes[Int=>Boolean] =
+  (i : Computes[Int]) =>
+    ComputesSwitch(
+      i,
+      List((ComputesExpr(List(), es => '{ 0 }), ComputesExpr(List(), es => '{ true }))),
+      Some(countdown(ComputesExpr(List(i), es => '{ ${ es(0).asInstanceOf[Expr[Int]] } - 1 }))))
+
+inline def doAdd1(i : Int) : Int = ${ Computes.reifyCall(add1, '{ i }) }
+
+inline def doCountdown(i : Int) : Boolean = ${ Computes.reifyCall(countdown, '{ i }) }
 
