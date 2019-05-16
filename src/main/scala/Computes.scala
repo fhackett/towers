@@ -11,6 +11,8 @@ sealed abstract class Computes[Tp : Type] {
   type T = Tp
   val tType = implicitly[Type[T]]
   val key = ComputesKey()
+
+  def +[T2,Out](rhs : Computes[T2])(implicit ev : Computes.OverridesPlus[Tp,T2,Out]) : Computes[Out] = ev.+(this, rhs)
 }
 
 abstract class Computable[T : Type] extends Computes[T] {
@@ -62,8 +64,12 @@ object Computes {
     }
   }
 
-  implicit class ComputesApplicationOp[Arg : Type,Result : Type](fn : =>Computes[Arg=>Result]) {
+  implicit class ComputesApplicationOp[Arg, Result : Type](fn : =>Computes[Arg=>Result]) {
     def apply(arg : Computes[Arg]) : Computes[Result] = ComputesApply(arg, fn)
+  }
+
+  trait OverridesPlus[Lhs,Rhs,Out] {
+    def +(lhs : Computes[Lhs], rhs : Computes[Rhs]) : Computes[Out]
   }
 
   def ensureTraversable[T](computes : Computes[T]) : Unit = {
@@ -523,9 +529,51 @@ object Computes {
     blocks.toList
   }
 
+  def findFreeVariables[T](computes : Computes[T]) : List[ComputesVar[_]] = {
+    val visitedSet = HashSet[ComputesKey]()
+    val isBound = HashSet[ComputesKey]()
+    val freeVars = ArrayBuffer[ComputesVar[_]]()
+    def impl[T](computes : Computes[T]) : Unit = computes match {
+      case c : Computable[T] => ???
+      case c : ComputesVar[T] =>
+        if !isBound(c.key) && !visitedSet(c.key) then {
+          freeVars += c
+          visitedSet += c.key
+        }
+      case c : ComputesBinding[_,T] => {
+        isBound += c.name.key
+        impl(c.value)
+        impl(c.body)
+      }
+      case c : ComputesExpr[T] => c.params.foreach(impl(_))
+      case c : ComputesApply[_,T] => {
+        impl(c.argument)
+        if !visitedSet(c.function.key) then {
+          visitedSet += c.function.key
+          impl(c.function)
+        }
+      }
+      case c : ComputesSwitch[_,T] => {
+        impl(c.argument)
+        for((v,r) <- c.cases) {
+          impl(v)
+          impl(r)
+        }
+        c.default.foreach(impl(_))
+      }
+      case c : ComputesFunction[_,_] => {
+        isBound += c.arg.key
+        impl(c.body)
+      }
+    }
+    visitedSet += computes.key
+    impl(computes)
+    freeVars.toList
+  }
+
   def codegenBlock[A,R](computes : ComputesFunction[A,R], pcMap : Map[ComputesKey,Int], arg : Expr[A], closure : Expr[Array[Any]],
-                      pushStack : Expr[(Int,Array[Any])]=>Expr[Unit])
-                     (implicit reflection : Reflection): Expr[Any] = {
+                        pushStack : Expr[(Int,Array[Any])]=>Expr[Unit])
+                       (implicit reflection : Reflection): Expr[Any] = {
     import reflection._
     def impl[T](computes : Computes[T], vMap : Map[ComputesKey,Expr[Any]]) : Expr[Any] = computes match {
       case c : Computable[T] => ???
@@ -584,10 +632,27 @@ object Computes {
               })).getOrElse(Nil)).seal
       }
       case c : ComputesFunction[_,_] => {
-        '{ ( ${ pcMap(c.key).toExpr }, null ) } // FIXME: actually generate closures
+        val freeVariables = findFreeVariables(c)
+        val refs : List[Expr[Any]] = freeVariables.map(v => vMap(v.key))   
+        val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then {
+          Apply(Ref(definitions.Array_apply), refs.map(_.unseal)).seal.cast[Array[Any]]
+        } else {
+          '{ null }
+        }
+        '{ ( ${ pcMap(c.key).toExpr }, ${ closureExpr } ) }
       }
     }
-    impl(computes.body, Map(computes.arg.key -> arg))
+
+    // bind all closed over variables to local names and add them to scope
+    var withBindings : Map[ComputesKey,Expr[Any]] => Expr[Any] = impl(computes.body, _)
+    for((v,idx) <- findFreeVariables(computes).zipWithIndex) {
+      withBindings =
+        vMap => '{
+          val closureVar = ${ closure }(${ idx.toExpr })
+          ${ withBindings(vMap + ((v.key, '{ closureVar }))) }
+        }
+    }
+    withBindings(Map(computes.arg.key -> arg))
   }
 
   def reifyCall[Arg : Type, Result : Type](computes : Computes[Arg=>Result], arg : Expr[Arg])
@@ -639,20 +704,106 @@ object Computes {
   /* implicit class ComputesFnCallCompiler[Arg, Result](inline computes : Computes[Arg=>Result]) {
     inline def reifyCall(arg : Arg) : Result = ${ reifyCallImpl(computes, '{arg}) }
   } */
+  
+  implicit val ComputesIntOpsOverridesPlus : OverridesPlus[Int,Int,Int] = new {
+    def +(lhs : Computes[Int], rhs : Computes[Int]) : Computes[Int] =
+      expr((lhs, rhs), t => t match { case (lhs,rhs) => '{ ${ lhs } + ${ rhs } }})
+  }
+  
+  implicit class ComputesIntOps(lhs : Computes[Int]) {
+    def -(rhs : Computes[Int]) : Computes[Int] =
+      expr((lhs, rhs), t => t match { case (lhs,rhs) => '{ ${ lhs } - ${ rhs } }})
+  }
+
+  implicit class ComputesTuple2[T1 : Type, T2 : Type](tuple : (Computes[T1],Computes[T2])) extends Computable[(T1,T2)] {
+    def parts : List[Computes[_]] = List(tuple._1, tuple._2)
+    def replace(parts : List[Computes[_]]) : Computable[T] = parts match {
+      case List(t1, t2) => ComputesTuple2((t1.asInstanceOf[Computes[T1]], t2.asInstanceOf[Computes[T2]]))
+      case _ => ???
+    }
+
+    def tryFold(parts : List[Computes[_]]) : Option[Computes[T]] = None
+    def flatten : Computes[(T1,T2)] =
+      ComputesExpr(List(tuple._1, tuple._2), ex => '{ (${ ex(0).asInstanceOf[Expr[T1]] }, ${ ex(1).asInstanceOf[Expr[T2]] }) })
+      // expr(tuple : (Computes[T1],Computes[T2]), (etpl : (Expr[T1],Expr[T2])) => '{ (${ etpl._1 }, ${ etpl._2 }) })
+  }
+
+  implicit class ComputesTuple2Ops[T1 : Type, T2 : Type](lhs : Computes[(T1,T2)]) {
+    def _1 : Computes[T1] =
+      expr(lhs, lhs => '{ ${ lhs }._1 })
+    def _2 : Computes[T2] =
+      expr(lhs, lhs => '{ ${ lhs }._2 })
+  }
+
+  implicit class ComputesListOps[T : Type](lhs : Computes[List[T]]) {
+    def isEmpty : Computes[Boolean] =
+      expr(lhs, lhs => '{ ${ lhs }.isEmpty })
+    def head : Computes[T] =
+      expr(lhs, lhs => '{ ${ lhs }.head })
+    def tail : Computes[List[T]] =
+      expr(lhs, lhs => '{ ${ lhs }.tail })
+  }
+
+  implicit class ComputesSwitchOp[Lhs](lhs : Computes[Lhs]) {
+    def switch[Rhs : Type](cases : List[(Computes[Lhs],Computes[Rhs])], default : Computes[Rhs]) : Computes[Rhs] =
+      ComputesSwitch(lhs, cases, Some(default))
+    def switch[Rhs : Type](cases : List[(Computes[Lhs],Computes[Rhs])]) : Computes[Rhs] =
+      ComputesSwitch(lhs, cases, None)
+  }
+
+  def let[V,T : Type](value : Computes[V], body : Computes[V=>T]) : Computes[T] = body(value)
+
+  def const[T : Type : Liftable](v : T) : Computes[T] =
+    ComputesExpr(Nil, es => v.toExpr)
+
+  type ComputesToExpr[C <: Tuple] <: Tuple = C match {
+    case Unit => Unit
+    case Computes[t] *: tl => Expr[t] *: ComputesToExpr[tl]
+  }
+
+  def expr[T : Type, Param](param : Computes[Param], body : Expr[Param] => Expr[T]) : Computes[T] =
+    ComputesExpr(
+      List(param),
+      exprs => body(exprs.head.asInstanceOf[Expr[Param]]))
+
+  def expr[T : Type, Params <: Tuple](params : Params, body : ComputesToExpr[Params] => Expr[T]) : Computes[T] =
+    ComputesExpr(
+      params.toArray.toList.asInstanceOf[List[Computes[_]]],
+      exprs => body(exprs.foldRight(() : Tuple)((hd, tl) => hd *: tl).asInstanceOf[ComputesToExpr[Params]]))
 
 }
 
+import Computes._
+
 val add1 : Computes[Int=>Int] =
-  (i : Computes[Int]) => ComputesExpr(List(i), es => '{ ${ es(0).asInstanceOf[Expr[Int]] } + 1 })
+  (i : Computes[Int]) => i+const(1)
 
 val countdown : Computes[Int=>Boolean] =
   (i : Computes[Int]) =>
-    ComputesSwitch(
-      i,
-      List((ComputesExpr(List(), es => '{ 0 }), ComputesExpr(List(), es => '{ true }))),
-      Some(countdown(ComputesExpr(List(i), es => '{ ${ es(0).asInstanceOf[Expr[Int]] } - 1 }))))
+    i.switch(
+      List(const(0) -> const(true)),
+      default=countdown(i-const(1)))
+
+val unimap : Computes[((List[Int],Int=>Int))=>List[Int]] =
+  (args : Computes[(List[Int],Int=>Int)]) =>
+    let(expr(args, args => '{ ${ args }._1 }),
+      (list : Computes[List[Int]]) =>
+        let(expr(args, args => '{ ${ args }._2 }),
+          (fn : Computes[Int=>Int]) =>
+            list.isEmpty.switch(
+              List(
+                const(true) -> expr((), _ => '{ Nil }),
+                const(false) ->
+                  expr((fn(list.head), unimap((list.tail, fn))),
+                    tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))))
+
+val unimapAdd1 : Computes[List[Int]=>List[Int]] =
+  (list : Computes[List[Int]]) =>
+    unimap(list, add1)
 
 inline def doAdd1(i : Int) : Int = ${ Computes.reifyCall(add1, '{ i }) }
 
 inline def doCountdown(i : Int) : Boolean = ${ Computes.reifyCall(countdown, '{ i }) }
+
+inline def doUnimapAdd1(list : List[Int]) : List[Int] = ${ Computes.reifyCall(unimapAdd1, '{ list }) }
 
