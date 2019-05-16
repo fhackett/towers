@@ -479,8 +479,9 @@ object Computes {
         case c : ComputesFunction[_,_] => c.mapBody(impl(_))
       }
     }
+    visitedSet += computes.key
     val result = impl(computes)
-    substitutions(result.key) = result
+    substitutions(computes.key) = result
     result
   }
 
@@ -517,7 +518,7 @@ object Computes {
     }
     visitedSet += computes.key
     // assume top-level Computes is a function literal ... be very confused if it isn't
-    // this assumption means that impl will pick it up immediately and find everything else via its body
+    // this assumption means that impl will pick it up immediately and add it to blocks for us
     impl(computes)
     blocks.toList
   }
