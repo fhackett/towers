@@ -12,249 +12,372 @@ sealed abstract class Computes[Tp : Type] {
   val tType = implicitly[Type[T]]
   val key = ComputesKey()
 
-  def +[T2,Out](rhs : Computes[T2])(implicit ev : Computes.OverridesPlus[Tp,T2,Out]) : Computes[Out] = ev.+(this, rhs)
-}
+  // we use object identity, so sometimes we need an identical but different object
+  def shallowClone : Computes[Tp]
 
-abstract class Computable[T : Type] extends Computes[T] {
-  def parts : List[Computes[_]]
-  def replace(parts : List[Computes[_]]) : Computable[T]
+  // mutable Product - used internally
+  def setComputesElement(n : Int, v : Computes[_]) : Unit
+  def getComputesElement(n : Int) : Computes[_]
+  def computesArity : Int
 
-  def tryFold(parts : List[Computes[_]]) : Option[Computes[T]]
-  def flatten : Computes[T]
-}
-
-class ComputesVar[T : Type]() extends Computes[T] {
-  var binding : Option[Computes[T]] = None // this simulates let-bindings without introducing any AST nodes for them
-                                           // why? so the optimisers are not affected by how many/few let-bindings
-                                           // are generated.
-                                           // let-bindings can obscure AST structure "high" up the AST without really adding anything
-                                           // but this is guaranteed to cause no more disruption than 2 or more Var nodes
-                                           // that we can't inline, keeping all other structure intact
-}
-
-// you will never see this outside of final stages of compilation - generally all bindings are hidden inside the Var nodes
-class ComputesBinding[V, T : Type](val name : ComputesVar[V], val value : Computes[V], val body : Computes[T]) extends Computes[T]
-
-class ComputesExpr[T : Type](val params : List[Computes[_]], val exprFn : List[Expr[_]] => Expr[T]) extends Computes[T]
-
-class ComputesApply[Arg, Result : Type](val argument : Computes[Arg], fn : =>Computes[Arg=>Result]) extends Computes[Result] {
-  lazy val function = fn
-}
-
-class ComputesSwitch[Arg, Result : Type](val argument : Computes[Arg], val cases : List[(Computes[Arg],Computes[Result])],
-  val default : Option[Computes[Result]]) extends Computes[Result]
-
-sealed abstract class VMAction
-case class CallAction(val dest : Int, val arg : Any) extends VMAction
-case class ReturnAction(val ret : Any) extends VMAction
-case class PushRetAction(val pushed : (Int,Tuple), val next : VMAction) extends VMAction
-
-object Computes {
-
-  implicit class ComputesFunction[Arg : Type, Result : Type](fn : Computes[Arg] => Computes[Result]) extends Computes[Arg=>Result] {
-    var arg = ComputesVar[Arg]() // mutable, or we can't implement mapBody
-    val body : Computes[Result] = fn(arg)
-
-    type AT = Arg
-
-    def mapBody(fn : Computes[Result] => Computes[Result]) : ComputesFunction[Arg,Result] = {
-      val mapped = ComputesFunction[Arg,Result](_ => fn(body))
-      mapped.arg = arg
-      mapped
+  def computesIterator : Iterator[Computes[_]] = new scala.collection.AbstractIterator {
+    private var c = 0
+    private val cmax = computesArity
+    override def hasNext = c < cmax
+    override def next() = {
+      val result = getComputesElement(c)
+      c += 1
+      result
     }
   }
 
-  implicit class ComputesApplicationOp[Arg, Result : Type](fn : =>Computes[Arg=>Result]) {
-    def apply(arg : Computes[Arg]) : Computes[Result] = ComputesApply(arg, fn)
+  def +[T2,Out](rhs : Computes[T2])(implicit ev : Computes.OverridesPlus[Tp,T2,Out]) : Computes[Out] = ev.+(this, rhs)
+
+  // attempt to re-write this Computable (and contents) into something that is somehow "better"
+  // by pattern-matching subterms
+  def tryFold : Option[Computes[T]]
+}
+
+abstract class Computable[T : Type] extends Computes[T] {
+  // translate this Computable into some lower-level implementation
+  def flatten : Computes[T]
+
+  //val foldUnderstands : List[ClassTag[Computes[T]]]
+  //val flattenProduces : ClassTag[Computes[T]]
+}
+
+class ComputesVar[T : Type]() extends Computes[T] {
+  override def shallowClone = ???
+  override def setComputesElement(n : Int, v : Computes[_]) = throw IndexOutOfBoundsException(n.toString)
+  override def getComputesElement(n : Int) = throw IndexOutOfBoundsException(n.toString)
+  override def computesArity = 0
+  override def tryFold = None
+}
+
+class ComputesByKey[T : Type](val link : ComputesKey) extends Computes[T] {
+  override def shallowClone = ???
+  override def setComputesElement(n : Int, v : Computes[_]) = throw IndexOutOfBoundsException(n.toString)
+  override def getComputesElement(n : Int) = throw IndexOutOfBoundsException(n.toString)
+  override def computesArity = 0
+  override def tryFold = None
+}
+
+final class ComputesBinding[V, T : Type](var name : ComputesVar[V], var value : Computes[V], var body : Computes[T]) extends Computes[T] {
+  override def shallowClone = ComputesBinding(name, value, body)
+  override def setComputesElement(n : Int, v : Computes[_]) = n match {
+    case 0 => value = v.asInstanceOf[Computes[V]]
+    case 1 => body = v.asInstanceOf[Computes[T]]
+    case _ => throw IndexOutOfBoundsException(n.toString)
+  }
+  override def getComputesElement(n : Int) = n match {
+    case 0 => value
+    case 1 => body
+    case _ => throw IndexOutOfBoundsException(n.toString)
+  }
+  override def computesArity = 2
+  override def tryFold = None
+}
+
+class ComputesExpr[T : Type](var parameters : List[Computes[_]], val exprFn : List[Expr[_]] => Expr[T]) extends Computes[T] {
+  override def shallowClone = ComputesExpr(parameters, exprFn)
+  override def setComputesElement(n : Int, v : Computes[_]) = parameters = parameters.updated(n, v)
+  override def getComputesElement(n : Int) = parameters(n)
+  override def computesArity = parameters.length
+  override def tryFold = None
+}
+
+class ComputesApplication[FnType, Result : Type](var arguments : List[Computes[_]], var function : Computes[FnType]) extends Computes[Result] {
+  override def shallowClone = ComputesApplication(arguments, function)
+  override def setComputesElement(n : Int, v : Computes[_]) =
+    if n == arguments.length then
+      function = v.asInstanceOf[Computes[FnType]]
+    else
+      arguments = arguments.updated(n, v)
+  override def getComputesElement(n : Int) =
+    if n == arguments.length then
+      function
+    else
+      arguments(n)
+  override def computesArity = arguments.length + 1
+
+  override def tryFold = function match {
+    case fn : ComputesFunction[_,Result] =>
+      Some(
+        Computes.substitute(
+          (fn.parameters.map(_.key) zip arguments).toMap,
+          Computes.clone(fn.body)))
+    case _ => None
+  }
+}
+
+class ComputesLazyRef[T : Type](ref : =>Computes[T]) extends Computes[T] {
+  lazy val computes = ref
+  // this node should not survive the initial pass to eliminate it, and it's essentially impossible to implement these for it anyway
+  override def shallowClone = ???
+  override def setComputesElement(n : Int, v : Computes[_]) = ???
+  override def getComputesElement(n : Int) = ???
+  override def computesArity = ???
+  override def tryFold = ???
+}
+
+class ComputesFunction[FnType : Type, Result : Type](val parameters : List[ComputesVar[_]], var body : Computes[Result]) extends Computes[FnType] {
+  override def shallowClone = ComputesFunction(parameters, body) // TODO: renaming
+  override def setComputesElement(n : Int, v : Computes[_]) = n match {
+    case 0 => body = v.asInstanceOf[Computes[Result]]
+    case _ => throw IndexOutOfBoundsException(n.toString)
+  }
+  override def getComputesElement(n : Int) = n match {
+    case 0 => body
+    case _ => throw IndexOutOfBoundsException(n.toString)
+  }
+  override def computesArity = 1
+  override def tryFold = None
+}
+
+class ComputesSwitch[Arg, Result : Type](
+  var argument : Computes[Arg],
+  var cases : List[(Computes[Arg],Computes[Result])],
+  var default : Option[Computes[Result]]
+) extends Computes[Result] {
+  def toList : List[Computes[_]] =
+    List(argument) ++ cases.flatMap((tpl : (Computes[Arg],Computes[Result])) => List(tpl._1,tpl._2)) ++ default.map(List(_)).getOrElse(List.empty)
+  def fromList(list : List[Computes[_]]) = {
+    argument = list.head.asInstanceOf[Computes[Arg]]
+    val dExists = list.length % 2 == 0 // list argument, default and some case pairs make an even number (odd without default)
+    if dExists then
+      default = Some(list.last.asInstanceOf[Computes[Result]])
+    else
+      default = None
+    val cs = if dExists then list.tail.dropRight(1) else list.tail
+    cases = (for(List(a,v) <- cs.grouped(2)) yield (a.asInstanceOf[Computes[Arg]], v.asInstanceOf[Computes[Result]])).toList
+  }
+
+  override def shallowClone = ComputesSwitch(argument, cases, default)
+  override def setComputesElement(n : Int, v : Computes[_]) = fromList(toList.updated(n, v))
+  override def getComputesElement(n : Int) = toList(n)
+  override def computesArity = toList.length
+  override def tryFold = None
+}
+
+object Computes {
+
+  implicit def freshVar[T : Type] : ComputesVar[T] = ComputesVar[T]()
+
+  def ref[T : Type](computes : =>Computes[T]) : Computes[T] = ComputesLazyRef(computes)
+
+  implicit class ComputesFunction1[
+    Arg1 : Type,
+    Result : Type](
+      fn : Computes[Arg1] => Computes[Result]
+    )(implicit
+      arg1 : ComputesVar[Arg1]
+    ) extends ComputesFunction[Arg1=>Result,Result](List(arg1), fn(arg1))
+
+  implicit class ComputesFunction2[
+    Arg1 : Type, Arg2 : Type,
+    Result : Type](
+      fn : (Computes[Arg1], Computes[Arg2]) => Computes[Result]
+    )(implicit
+      arg1 : ComputesVar[Arg1],
+      arg2 : ComputesVar[Arg2]
+    ) extends ComputesFunction[(Arg1,Arg2)=>Result,Result](List(arg1, arg2), fn(arg1, arg2))
+
+  implicit class ComputesFunction3[
+    Arg1 : Type, Arg2 : Type, Arg3 : Type,
+    Result : Type](
+      fn : (Computes[Arg1], Computes[Arg2], Computes[Arg3]) => Computes[Result]
+    )(implicit
+      arg1 : ComputesVar[Arg1],
+      arg2 : ComputesVar[Arg2],
+      arg3 : ComputesVar[Arg3]
+    ) extends ComputesFunction[(Arg1,Arg2,Arg3)=>Result,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
+
+  implicit class ComputesApplication1[Arg1 : Type, Result : Type](fn : =>Computes[Arg1=>Result]) {
+    def apply(arg1 : Computes[Arg1]) : Computes[Result] = ComputesApplication(List(arg1), ref(fn))
+  }
+
+  implicit class ComputesApplication2[Arg1 : Type, Arg2 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2)=>Result]) {
+    def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2]) : Computes[Result] = ComputesApplication(List(arg1, arg2), ref(fn))
+  }
+
+  implicit class ComputesApplication3[Arg1 : Type, Arg2 : Type, Arg3 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2,Arg3)=>Result]) {
+    def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2], arg3 : Computes[Arg3]) : Computes[Result] =
+      ComputesApplication(List(arg1, arg2, arg3), ref(fn))
   }
 
   trait OverridesPlus[Lhs,Rhs,Out] {
     def +(lhs : Computes[Lhs], rhs : Computes[Rhs]) : Computes[Out]
   }
 
-  def ensureTraversable[T](computes : Computes[T]) : Unit = {
-    val visitedSet = HashSet[ComputesKey]()
-    def impl[T](computes : Computes[T]) : Unit = computes match {
-      case c : Computable[T] => c.parts.foreach(impl(_))
-      case c : ComputesVar[T] => ()
-      case c : ComputesBinding[_,_] => {
-        impl(c.value)
-        impl(c.body)
-      }
-      case c : ComputesExpr[T] => c.params.foreach(impl(_))
-      case c : ComputesApply[_,T] => {
-        impl(c.argument)
-        if !visitedSet(c.function.key) then {
-          visitedSet += c.function.key
-          impl(c.function)
+  def addIndirect(key : ComputesKey, parent : Computes[_], indirects : HashMap[ComputesKey,ArrayBuffer[Computes[_]]]) : Unit = {
+    var buf = indirects.getOrElseUpdate(key, ArrayBuffer())
+    buf += parent
+  }
+
+  def fixIndirects(key : ComputesKey, patch : Computes[_], indirects : HashMap[ComputesKey,ArrayBuffer[Computes[_]]]) : Unit = {
+    if indirects.contains(key) then {
+      for(parent <- indirects(key);
+          i <- 0 until parent.computesArity) {
+        parent.getComputesElement(i) match {
+          case c : ComputesByKey[_] if c.link == key =>
+            parent.setComputesElement(i, patch)
+          case _ => ()
         }
       }
-      case c : ComputesSwitch[_,T] => {
-        impl(c.argument)
-        for((v, r) <- c.cases) {
-          impl(v)
-          impl(r)
-        }
-        c.default.foreach(impl(_))
-      }
-      case c : ComputesFunction[_,_] => impl(c.body)
+      indirects -= key
     }
   }
 
-  def removeRedundantIndirects[T](computes : Computes[T]) : Computes[T] = {
-    val ingressCounts = HashMap[ComputesKey,Int]()
-    ;{
-      val visitedSet = HashSet[ComputesKey]()
-      def countIngresses[T](computes : Computes[T]) : Unit = computes match {
-        case c : Computable[T] => c.parts.foreach(countIngresses(_))
-        case c : ComputesVar[T] => {
-          if !visitedSet(c.key) then {
-            visitedSet += c.key
-            ingressCounts(c.key) = 1
-            c.binding.foreach(countIngresses(_))
-          } else {
-            ingressCounts(c.key) += 1
+  def eliminateLazyRefs[T](computes : Computes[T]) : Computes[T] = {
+    val substitutions = HashMap[ComputesKey,Computes[_]]()
+    val indirects = HashMap[ComputesKey,ArrayBuffer[Computes[_]]]()
+
+    def impl[T](computes : Computes[T], parent : Computes[_]) : Computes[T] = {
+      if substitutions.contains(computes.key) then {
+        val sub = substitutions(computes.key)
+        if sub == null then {
+          implicit val e1 = computes.tType
+          addIndirect(computes.key, parent, indirects)
+          ComputesByKey(computes.key)
+        } else {
+          sub.asInstanceOf[Computes[T]]
+        }
+      } else {
+        substitutions(computes.key) = null
+        val result = computes match {
+          case lz : ComputesLazyRef[T] =>
+            impl(lz.computes, parent)
+          case _ => {
+            for(i <- 0 until computes.computesArity) {
+              computes.setComputesElement(i, impl(computes.getComputesElement(i), computes))
+            }
+            computes
           }
         }
-        case c : ComputesBinding[_,_] => ???
-        case c : ComputesExpr[T] => c.params.foreach(countIngresses(_))
-        case c : ComputesApply[_,T] => {
-          countIngresses(c.argument)
-          if !visitedSet(c.function.key) then {
-            visitedSet += c.function.key
-            ingressCounts(c.function.key) = 1
-            countIngresses(c.function)
-          } else {
-            ingressCounts(c.function.key) += 1
-          }
-        }
-        case c : ComputesSwitch[_,T] => {
-          countIngresses(c.argument)
-          for((v, r) <- c.cases) {
-            countIngresses(v)
-            countIngresses(r)
-          }
-          c.default.foreach(countIngresses(_))
-        }
-        case c : ComputesFunction[_,_] => countIngresses(c.body)
+        substitutions(computes.key) = result
+        fixIndirects(computes.key, result, indirects)
+        result
       }
-      visitedSet += computes.key
-      ingressCounts(computes.key) = 1
-      countIngresses(computes)
     }
-    ;{
-      val visitedSet = HashSet[ComputesKey]()
-      val substitutions = HashMap[ComputesKey,Computes[_]]()
-      visitedSet += computes.key
-      def removeSingletonIndirects[T](computes : Computes[T]) : Computes[T] = {
-        implicit val e1 = computes.tType
-        computes match {
-          case c : Computable[T] => c.replace(c.parts.map(removeSingletonIndirects(_)))
-          case c : ComputesVar[T] =>
-            // if a bound variable is used exactly once, we can substitute it with the AST for its value
-            // this is the simplest useful but strictly correct strategy I could find.
-            // we could be "smarter", like "small constants can be substituted" or something, but are not
-            // right now
-            // note: as below, we check substitution before we check if we've seen this var before since
-            // beta reduction adds a new binding and reruns this code
-            if ingressCounts(c.key) == 1 && !c.binding.isEmpty then {
-              val sub = if !visitedSet(c.key) then {
-                removeSingletonIndirects(c.binding.get)
-              } else {
-                c.binding.get
-              }
-              substitutions(c.key) = sub
-              sub
-            } else {
-              if !visitedSet(c.key) then {
-                visitedSet += c.key
-                c.binding = c.binding.map(removeSingletonIndirects(_))
-                substitutions(c.key) = c
-              }
-              c
-            }
-          case c : ComputesBinding[_,_] => ???
-          case c : ComputesExpr[T] => ComputesExpr(c.params.map(removeSingletonIndirects(_)), c.exprFn)
-          case c : ComputesApply[_,T] => {
-            val arg = removeSingletonIndirects(c.argument)
-            if ingressCounts(c.function.key) == 1 then {
-              val fn = removeSingletonIndirects(c.function)
-              // try to perform beta reduction
-              fn match {
-                case cc : ComputesFunction[c.argument.T,T] => {
-                  // binds the argument then looks for any further opportunities in the body
-                  // now that we know what the argument is (this is why it this code is written
-                  // like it's ok to process the same node twice - the body will be visited twice or more)
-                  cc.arg.binding = Some(arg)
-                  removeSingletonIndirects(cc.body)
-                }
-                case _ => ComputesApply(arg, fn) // reaching this means we don't know the function body
-                                                 // give up for now, maybe it will be bound later
-              }
-            } else {
-              if !visitedSet(c.function.key) then {
-                visitedSet += c.function.key
-                val sub = removeSingletonIndirects(c.function)
-                substitutions(c.function.key) = sub
-                ComputesApply(arg, sub)
-              } else {
-                ComputesApply(arg, substitutions(c.function.key).asInstanceOf[Computes[c.argument.T=>T]])
-              }
-            }
-          }
-          case c : ComputesSwitch[_,T] => {
-            ComputesSwitch(
-              removeSingletonIndirects(c.argument),
-              for((v, r) <- c.cases)
-                yield (removeSingletonIndirects(v), removeSingletonIndirects(r)),
-              c.default.map(removeSingletonIndirects(_)))
-          }
-          case c : ComputesFunction[_,_] => c.mapBody(removeSingletonIndirects(_))
+    impl(computes, null)
+  }
+
+  def clone[T](computes : Computes[T]) : Computes[T] = computes match {
+    case c : ComputesVar[T] => c
+    case c : ComputesByKey[T] => c
+    case _ => {
+      val shallow = computes.shallowClone
+      for(i <- 0 until shallow.computesArity) {
+        shallow.setComputesElement(i, clone(shallow.getComputesElement(i)))
+      }
+      shallow
+    }
+  }
+  
+  def substitute[T](map : Map[ComputesKey,Computes[_]], computes : Computes[T]) : Computes[T] = computes match {
+    case c : ComputesVar[T] =>
+      if map.contains(c.key) then map(c.key).asInstanceOf[Computes[T]] else c
+    case _ => {
+      for(i <- 0 until computes.computesArity) {
+        computes.setComputesElement(i, substitute(map, computes.getComputesElement(i)))
+      }
+      computes
+    }
+  }
+
+  def performInlining[T](computes : Computes[T]) : Computes[T] = {
+    val substitutions = HashMap[ComputesKey,Computes[_]]()
+    val indirects = HashMap[ComputesKey,ArrayBuffer[Computes[_]]]()
+    val isRecursive = HashSet[ComputesKey]()
+
+    def findRecursive[T](computes : Computes[T], reachableFrom : Set[ComputesKey]) : Unit =
+      if isRecursive(computes.key) then {
+        ()
+      } else if reachableFrom(computes.key) then {
+        isRecursive += computes.key
+      } else {
+        val reachableFrom2 = reachableFrom + computes.key
+        for(i <- 0 until computes.computesArity) {
+          findRecursive(computes.getComputesElement(i), reachableFrom2)
         }
       }
-      visitedSet += computes.key
-      val result = removeSingletonIndirects(computes)
-      substitutions(computes.key) = result
-      ensureTraversable(result)
-      result
+
+    def impl[T](computes : Computes[T], parent : Computes[_]) : Computes[T] = {
+      if substitutions.contains(computes.key) then {
+        val sub = substitutions(computes.key)
+        if sub == null then {
+          implicit val e1 = computes.tType
+          addIndirect(computes.key, parent, indirects)
+          ComputesByKey(computes.key)
+        } else {
+          sub.asInstanceOf[Computes[T]]
+        }
+      } else {
+        substitutions(computes.key) = null
+        for(i <- 0 until computes.computesArity) {
+          computes.setComputesElement(i, impl(computes.getComputesElement(i), computes))
+        }
+        val result = if isRecursive(computes.key) then {
+          computes // don't fold if a node contains itself (though you might have folded something locally inside the node)
+        } else {
+          computes.tryFold match {
+            case Some(folded) => {
+              val f2 = eliminateLazyRefs(folded)
+              findRecursive(f2, Set.empty) // folds may somehow introduce local recursions we didn't know about
+              // recurse on fold result in case the result of the fold needs any inlining
+              // (this will ignore anything the fold didn't touch because the key will already be in substitutions)
+              impl(f2, parent)
+            }
+            case None => computes
+          }
+        }
+        substitutions(computes.key) = result
+        fixIndirects(computes.key, result, indirects)
+        result
+      }
     }
+
+    findRecursive(computes, Set.empty)
+    impl(computes, null)
   }
 
   def flatten[T](computes : Computes[T]) : Computes[T] = {
-    val visitedSet = HashSet[ComputesKey]()
-    val substitutions = HashMap[ComputesKey, Computes[_]]()
-    def impl[T](computes : Computes[T]) : Computes[T] = {
-      implicit val e1 = computes.tType
-      computes match {
-        case c : Computable[T] => impl(c.flatten)
-        case c : ComputesVar[T] => c
-        case c : ComputesBinding[_,T] => ???
-        case c : ComputesExpr[T] => ComputesExpr(c.params.map(impl(_)), c.exprFn)
-        case c : ComputesApply[_,T] =>
-          if visitedSet(c.function.key) then {
-            ComputesApply(impl(c.argument), substitutions(c.function.key).asInstanceOf[Computes[c.argument.T=>T]])
-          } else {
-            visitedSet += c.function.key
-            val sub = impl(c.function)
-            substitutions(c.function.key) = sub
-            ComputesApply(impl(c.argument), sub)
+    val substitutions = HashMap[ComputesKey,Computes[_]]()
+    val indirects = HashMap[ComputesKey,ArrayBuffer[Computes[_]]]()
+
+    def impl[T](computes : Computes[T], parent : Computes[_]) : Computes[T] = {
+      if substitutions.contains(computes.key) then {
+        val sub = substitutions(computes.key)
+        if sub == null then {
+          implicit val e1 = computes.tType
+          addIndirect(computes.key, parent, indirects)
+          ComputesByKey(computes.key)
+        } else {
+          sub.asInstanceOf[Computes[T]]
+        }
+      } else {
+        substitutions(computes.key) = null
+        for(i <- 0 until computes.computesArity) {
+          computes.setComputesElement(i, impl(computes.getComputesElement(i), computes))
+        }
+        val result = computes match {
+          case c : Computable[T] => {
+            val flat = eliminateLazyRefs(c.flatten)
+            val inlined = performInlining(flat)
+            impl(inlined, parent)
           }
-        case c : ComputesSwitch[_,T] =>
-          ComputesSwitch(
-            impl(c.argument),
-            for((v,r) <- c.cases)
-              yield (impl(v), impl(r)),
-            c.default.map(impl(_)))
-        case c : ComputesFunction[_,_] => c.mapBody(impl(_))
+          case _ => computes
+        }
+        substitutions(computes.key) = result
+        fixIndirects(computes.key, result, indirects)
+        result
       }
     }
-    visitedSet += computes.key
-    val result = impl(computes)
-    substitutions(computes.key) = result
-    result
+
+    impl(computes, null)
   }
 
-  def inferBindings[T](computes : Computes[T]) : Computes[T] = {
+  /*def inferBindings[T](computes : Computes[T]) : Computes[T] = {
     val mentionCounts = HashMap[ComputesKey, Int]()
     ;{
       val visitedSet = HashSet[ComputesKey]()
@@ -347,9 +470,9 @@ object Computes {
     val result = impl(computes)
     substitutions(computes.key) = result
     result
-  }
+  }*/
 
-  def containsCall[T](computes : Computes[T]) : Boolean = computes match {
+  /*def containsApplication[T](computes : Computes[T]) : Boolean = computes match {
         case c : Computable[T] => ???
         case c : ComputesVar[T] => false
         case c : ComputesBinding[_,T] => containsCall(c.value) || containsCall(c.body)
@@ -362,167 +485,115 @@ object Computes {
         case c : ComputesFunction[_,_] => false 
   }
 
-  def replaceVar[T,V](computes : Computes[T], target : ComputesVar[V], value : Computes[V]) : Computes[T] = {
-    val visitedSet = HashSet[ComputesKey]()
-    val substitutions = HashMap[ComputesKey,Computes[_]]()
-    def impl[T](computes : Computes[T]) : Computes[T] = {
-      implicit val e1 = computes.tType
-      computes match {
-        case c : Computable[T] => ???
-        case c : ComputesVar[T] =>
-          if c.key == target.key then
-            value.asInstanceOf[Computes[T]]
-          else
-            c
-        case c : ComputesBinding[_,T] => ComputesBinding(c.name, impl(c.value), impl(c.body))
-        case c : ComputesExpr[T] => ComputesExpr(c.params.map(impl(_)), c.exprFn)
-        case c : ComputesApply[_,T] =>
-          if visitedSet(c.function.key) then {
-            ComputesApply(impl(c.argument), substitutions(c.function.key).asInstanceOf[Computes[c.argument.T=>T]])
-          } else {
-            visitedSet += c.function.key
-            val sub = impl(c.function)
-            substitutions(c.function.key) = sub
-            ComputesApply(impl(c.argument), sub)
-          }
-        case c : ComputesSwitch[_,T] =>
-          ComputesSwitch(
-            impl(c.argument),
-            for((v,r) <- c.cases)
-              yield (impl(v), impl(r)),
-            c.default.map(impl(_)))
-        case c : ComputesFunction[_,_] => c.mapBody(impl(_))
-      }
-    }
-    visitedSet += computes.key
-    val result = impl(computes)
-    substitutions(computes.key) = result
-    result
-  }
-
   def complexify[T](computes : Computes[T]) : Computes[T] = {
-    val visitedSet = HashSet[ComputesKey]()
-    val substitutions = HashMap[ComputesKey, Computes[_]]()
-    def impl[T](computes : Computes[T]) : Computes[T] = {
-      implicit val e1 = computes.tType
-      computes match {
-        case c : Computable[T] => ???
-        case c : ComputesVar[T] => c
-        case c : ComputesBinding[_,T] => {
-          val value = impl(c.value)
-          val body = impl(c.body)
-          if containsCall(value) then {
-            implicit val e2 = value.tType
-            ComputesApply(value, ComputesFunction(v => replaceVar(body, c.name, v)))
-          } else {
-            ComputesBinding(c.name, value, body)
-          }
+    val substitutions = HashMap[ComputesKey,Computes[_]]()
+    val indirects = HashMap[ComputesKey,ArrayBuffer[Computes[_]]]()
+
+    def impl[T](computes : Computes[T], parent : Computes[_]) : Computes[T] = {
+      if substitutions.contains(computes.key) then {
+        val sub = substitutions(computes.key)
+        if sub == null {
+          addIndirect(computes.key, parent, indirects)
+          ComputesByKey(computes.key)
+        } else {
+          sub
         }
-        case c : ComputesExpr[T] => {
-          val params = c.params.map(impl(_))
-          val outParams = ArrayBuffer[Computes[_]]()
-          def proc(params : List[Computes[_]]) : Computes[T] = params match {
-            case Nil =>
-              ComputesExpr(outParams.toList, c.exprFn)
-            case hd :: tl =>
-              if containsCall(hd) then {
-                implicit val e2 = hd.tType
-                ComputesApply(hd, ComputesFunction(v => {
-                  outParams += v
-                  proc(tl)
-                }))
-              } else {
-                outParams += hd
-                proc(tl)
-              }
-          }
-          proc(params)
+      } else {
+        substitutions(computes.key) = null
+        for(i <- 0 until computes.computesArity) {
+          computes.setComputesElement(i, impl(computes.getComputesElement(i), computes))
         }
-        case c : ComputesApply[_,T] => {
-          val arg = impl(c.argument)
-          if visitedSet(c.function.key) then {
-            ComputesApply(arg, substitutions(c.function.key).asInstanceOf[Computes[c.argument.T=>T]])
-          } else {
-            visitedSet += c.function.key
-            val sub = impl(c.function)
-            substitutions(c.function.key) = sub
-            ComputesApply(arg, sub)
+        val result = computes match {
+          case c : Computable[T] => ???
+          case c : ComputesExpr[T] if c.parameters.exists(containsApplication(_)) => {
+            val args = c.parameters.map(_ => ComputesVar[_]())
+            ComputesApplication(c.parameters, ComputesFunction(args, ComputesExpr(args, c.exprFn)))
           }
+          case c : ComputesSwitch[_,T] if containsApplication(c.argument) || c.cases.exists(containsApplication(_._1)) => {
+            val arg = ComputesVar()
+            val caseArgs = c.cases.map(_ => ComputesVar[_]())
+            ComputesApplication(
+              c.argument :: c.cases.map(_._1),
+              ComputesFunction(
+                arg :: caseArgs,
+                ComputesSwitch(
+                  arg,
+                  for((ca, (a,v)) <- (caseArgs zip c.cases))
+                    yield (ca, v),
+                  default=c.default)))
+          }
+          // if the function you're applying is itself computed as result of some recursion, first compute the function
+          // then apply it
+          case c : ComputesApplication[_,T] if containsApplication(c.function) => {
+            val fn = ComputesVar()
+            ComputesApplication(
+              List(c.function),
+              ComputesFunction(
+                List(fn),
+                ComputesApplication(c.arguments, fn)))
+          }
+          case c : ComputesBinding[_,T] if containsApplication(c.value) => {
+            ComputesApplication(List(c.value), ComputesFunction(List(c.name), c.body))
+          }
+          case _ => computes
         }
-        case c : ComputesSwitch[_,T] => { // for the input + each value to compare against (but not the branches themselves!)
-                                          // ensure values do not involve calls or inject as many thunks as needed
-          type A = c.argument.T
-          val arg = impl(c.argument)
-          val cases = for((v,r) <- c.cases) yield (impl(v), impl(r))
-          val default = c.default.map(impl(_))
-          
-          def afterArg(arg : Computes[A]) : Computes[T] = {
-            val outCases = ArrayBuffer[(Computes[A],Computes[T])]()
-            def proc(cases : List[(Computes[A],Computes[T])]) : Computes[T] = cases match {
-              case Nil =>
-                ComputesSwitch(arg, outCases.toList, default)
-              case (hd @ (v,r)) :: tl =>
-                if containsCall(v) then {
-                  implicit val e2 = v.tType
-                  ComputesApply(v, ComputesFunction(vv => {
-                    outCases += ((vv, r))
-                    proc(tl)
-                  }))
-                } else {
-                  outCases += hd
-                  proc(tl)
-                }
-            }
-            proc(cases)
-          }
-          if containsCall(arg) then {
-            implicit val e2 = arg.tType
-            ComputesApply(arg, ComputesFunction(v => afterArg(v)))
-          } else {
-            afterArg(arg)
-          }
-        }
-        case c : ComputesFunction[_,_] => c.mapBody(impl(_))
+        substitutions(computes.key) = result
+        fixIndirects(computes.key, result, indirects)
+        result
       }
     }
-    visitedSet += computes.key
-    val result = impl(computes)
-    substitutions(computes.key) = result
-    result
+
+    impl(computes)
   }
 
-  def getBlocks[T](computes : Computes[T]) : List[ComputesFunction[_,_]] = {
+  def getBlocks[T](computes : Computes[T]) : List[Computes[_]] = {
     val visitedSet = HashSet[ComputesKey]()
     val blocks = ArrayBuffer[ComputesFunction[_,_]]()
-    def impl[T](computes : Computes[T]) : Unit = computes match {
-      case c : Computable[T] => ???
-      case c : ComputesVar[T] => ()
-      case c : ComputesBinding[_,T] => {
-        impl(c.value)
-        impl(c.body)
-      }
-      case c : ComputesExpr[T] => c.params.foreach(impl(_))
-      case c : ComputesApply[_,T] => {
-        impl(c.argument)
-        if !visitedSet(c.function.key) then {
-          visitedSet += c.function.key
-          impl(c.function)
+    def impl[T](computes : Computes[T]) : Unit = {
+      if visitedSet(computes.key) then {
+        ()
+      } else {
+        visitedSet += computes.key
+        computes match {
+          c : ComputesFunction[_,_] =>
+            blocks += c
+          c : ComputesExpr[T] => {
+            var needsBlock = false
+            for(param <- c.parameters) {
+              if needsBlock then {
+                blocks += param
+              } else if containsApplication then {
+                needsBlock = true
+              }
+            }
+          }
+          c : ComputesApplication[_,T] => {
+            var needsBlock = false
+            if containsApplication(c.function) then {
+              needsBlock = true
+              blocks += c
+            }
+            for(arg <- c.arguments) {
+              if needsBlock then {
+                blocks += arg
+              } else if containsApplication(param) then {
+                needsBlock = true
+              }
+            }
+          }
+          c : ComputesSwitch[_,T] => {
+            var needsBlock = false
+            if containsApplication(c.argument) then {
+              needsBlock = true
+              blocks += 
+            }
+          }
         }
-      }
-      case c : ComputesSwitch[_,T] => {
-        impl(c.argument)
-        for((v,r) <- c.cases) {
-          impl(v)
-          impl(r)
+        for(i <- 0 until computes.computesArity) {
+          impl(computes.getComputesElement(i))
         }
-        c.default.foreach(impl(_))
-      }
-      case c : ComputesFunction[_,_] => {
-        blocks += c
-        impl(c.body)
       }
     }
-    visitedSet += computes.key
     // assume top-level Computes is a function literal ... be very confused if it isn't
     // this assumption means that impl will pick it up immediately and add it to blocks for us
     impl(computes)
@@ -533,49 +604,127 @@ object Computes {
     val visitedSet = HashSet[ComputesKey]()
     val isBound = HashSet[ComputesKey]()
     val freeVars = ArrayBuffer[ComputesVar[_]]()
-    def impl[T](computes : Computes[T]) : Unit = computes match {
-      case c : Computable[T] => ???
-      case c : ComputesVar[T] =>
-        if !isBound(c.key) && !visitedSet(c.key) then {
-          freeVars += c
-          visitedSet += c.key
+    def impl[T](computes : Computes[T]) : Unit = {
+      if visitedSet(computes.key) then {
+        ()
+      } else {
+        visitedSet += computes.key
+        computes match {
+          case c : ComputesVar[T] =>
+            if !isBound(c.key) then {
+              freeVars += c
+            }
+          case c : ComputesBinding[_,T] => {
+            isBound += c.name.key
+          }
+          case c : ComputesFunction[_,_] => {
+            c.arguments.foreach(isBound += _)
+          }
+          case _ => ()
         }
-      case c : ComputesBinding[_,T] => {
-        isBound += c.name.key
-        impl(c.value)
-        impl(c.body)
-      }
-      case c : ComputesExpr[T] => c.params.foreach(impl(_))
-      case c : ComputesApply[_,T] => {
-        impl(c.argument)
-        if !visitedSet(c.function.key) then {
-          visitedSet += c.function.key
-          impl(c.function)
-        }
-      }
-      case c : ComputesSwitch[_,T] => {
-        impl(c.argument)
-        for((v,r) <- c.cases) {
-          impl(v)
-          impl(r)
-        }
-        c.default.foreach(impl(_))
-      }
-      case c : ComputesFunction[_,_] => {
-        isBound += c.arg.key
-        impl(c.body)
+        computes.computesIterator.foreach(impl(_))
       }
     }
-    visitedSet += computes.key
     impl(computes)
     freeVars.toList
   }
 
-  def codegenBlock[A,R](computes : ComputesFunction[A,R], pcMap : Map[ComputesKey,Int], arg : Expr[A], closure : Expr[Array[Any]],
-                        pushStack : Expr[(Int,Array[Any])]=>Expr[Unit])
-                       (implicit reflection : Reflection): Expr[Any] = {
+  def codegenExpr[T](computes : Computes[T], vMap : Map[ComputesKey,Expr[Any]])(implicit reflection : Reflection) : Expr[T] = {
     import reflection._
-    def impl[T](computes : Computes[T], vMap : Map[ComputesKey,Expr[Any]]) : Expr[Any] = computes match {
+    computes match {
+      case c : Computable[T] => ???
+      case c : ComputesVar[T] => vMap(c.key).asInstanceOf[Expr[T]]
+      case c : ComputesBinding[_,T] => {
+        implicit val e1 = c.value.tType
+        '{
+          val binding = ${ codegenExpr(c.value, vMap) }
+          ${ codegenExpr(c.body, vMap + ((c.name.key, '{ binding }))) }
+        }
+      }
+      case c : ComputesExpr[T] => {
+        def proc(inP : List[Computes[_]], outP : List[Expr[_]]) : Expr[T] = inP match {
+          case Nil => c.exprFn(outP)
+          case hd :: tl => {
+            implicit val e1 = computes.tType
+            implicit val e2 = hd.tType
+            '{
+              val exprParam = ${ codegenExpr(hd, vMap).asInstanceOf[Expr[hd.T]] }
+              ${ proc(tl, outP ++ List('{ exprParam })) }
+            }
+          }
+        }
+        proc(c.params, Nil)
+      }
+      case c : ComputesApplication[_,T] => ???
+      case c : ComputesSwitch[_,T] => {
+        val arg = codegenExpr(c.argument, vMap)
+        Match(
+          arg.unseal,
+          (for((v,r) <- c.cases)
+            yield CaseDef(
+              Pattern.Value(codegenExpr(v, vMap).unseal),
+              None,
+              impl(r, vMap).unseal))
+          ++ c.default.map(d =>
+              List({
+                // our unsuspecting branch donor, from whom we will steal the default branch
+                val bloodSacrifice = '{ ${ arg } match { case _ => ${ codegenExpr(d, vMap) } } }
+                bloodSacrifice.unseal match {
+                  case IsInlined(inl) => { // strip off an Inlined node that gets in our way
+                    inl.body match {
+                      case IsMatch(m) => {
+                        m.cases.head // if you can't make, it steal it...
+                                     // this is a terrible trick that should probably be replaced
+                      }
+                    }
+                  }
+                }
+              })).getOrElse(Nil)).seal
+      }
+      case c : ComputesFunction[_,_] => {
+        val freeVariables = findFreeVariables(c)
+        val refs : List[Expr[Any]] = freeVariables.map(v => vMap(v.key))   
+        val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then {
+          Apply(Ref(definitions.Array_apply), refs.map(_.unseal)).seal.cast[Array[Any]]
+        } else {
+          '{ null }
+        }
+        '{ ( ${ pcMap(c.key).toExpr }, ${ closureExpr } ) }
+      }
+    }
+  }
+
+  def codegenBlock[A,R](computes : ComputesFunction[A,R], pcMap : Map[ComputesKey,Int], arg : Expr[A], closure : Expr[Array[Any]],
+                        pushFStack : (Expr[Int],Expr[Array[Any]])=>Expr[Unit],
+                        pushDStack : Expr[Any]=>Expr[Unit], popDStack : Expr[Any])
+                       (implicit reflection : Reflection): Expr[Unit] = {
+    import reflection._
+    def impl[T](computes : Computes[T], vMap : Map[ComputesKey,Expr[Any]]) : Expr[Any] =
+      if containsApplication(computes) then {
+        computes match {
+          case c : ComputesBinding[_,T] => {
+            implicit val e1 = c.value.tType
+            '{
+              val binding = ${ codegenExpr(c.value, vMap) }
+              ${ impl(c.body, vMap + ((c.name.key, '{ binding }))) }
+            }
+          }
+          case c : ComputesApplication[_,T] => {
+            '{
+              val (fPc,fClosure) = ${ 
+                // TODO assert !containsApplication(c.function), needs to be included in complexify
+                codegenExpr(c.function, vMap).asInstanceOf[Expr[(Int,Array[Any])]]
+              }
+              ${ pushFStack('{ fPc }, '{ fClosure }) }
+              ${ 
+            }
+          }
+        }
+      } else {
+        pushDStack(codegenExpr(computes, vMap))
+      }
+      
+      computes match {
       case c : Computable[T] => ???
       case c : ComputesVar[T] => vMap(c.key).asInstanceOf[Expr[T]]
       case c : ComputesBinding[_,T] => {
@@ -602,7 +751,7 @@ object Computes {
       case c : ComputesApply[_,T] => {
         '{
           val fn = ${ impl(c.function, vMap).asInstanceOf[Expr[(Int,Array[Any])]] }
-          ${ pushStack('{ fn }) }
+          ${ pushStack('{ fn }) } // TODO, FStack and DStack; simple values are returned, possible callsites manipulate stack
           ${ impl(c.argument, vMap) }
         }
       }
@@ -653,13 +802,16 @@ object Computes {
         }
     }
     withBindings(Map(computes.arg.key -> arg))
-  }
+  }*/
 
   def reifyCall[Arg : Type, Result : Type](computes : Computes[Arg=>Result], arg : Expr[Arg])
                                           (implicit reflection: Reflection) = {
-    val inlinedComputes = removeRedundantIndirects(computes)
+    val noLazy = eliminateLazyRefs(computes)
+    val inlinedComputes = performInlining(noLazy)
     val flattenedComputes = flatten(inlinedComputes)
-    val reboundComputes = inferBindings(flattenedComputes)
+
+    ???
+    /*val reboundComputes = inferBindings(flattenedComputes)
     val complexifiedComputes = complexify(reboundComputes)
 
     val rootKey = complexifiedComputes.key
@@ -696,7 +848,7 @@ object Computes {
       reg.asInstanceOf[Result]
     }
     println(expr.show) // DEBUG
-    expr
+    expr*/
   }
 
   // problem: even if the input expression is globally reachable, we can't tell here because of how
@@ -715,17 +867,30 @@ object Computes {
       expr((lhs, rhs), t => t match { case (lhs,rhs) => '{ ${ lhs } - ${ rhs } }})
   }
 
-  implicit class ComputesTuple2[T1 : Type, T2 : Type](tuple : (Computes[T1],Computes[T2])) extends Computable[(T1,T2)] {
-    def parts : List[Computes[_]] = List(tuple._1, tuple._2)
-    def replace(parts : List[Computes[_]]) : Computable[T] = parts match {
-      case List(t1, t2) => ComputesTuple2((t1.asInstanceOf[Computes[T1]], t2.asInstanceOf[Computes[T2]]))
-      case _ => ???
+  implicit class ComputesTuple2[T1, T2](tpl : (Computes[T1],Computes[T2])) extends Computable[(T1,T2)]()('[(${ tpl._1.tType },${ tpl._2.tType })]) {
+    var tuple = tpl
+
+    override def shallowClone = ComputesTuple2(tuple)
+
+    override def computesArity = 0
+    override def getComputesElement(n : Int) : Computes[_] = n match {
+      case 0 => tuple._1
+      case 1 => tuple._2
+      case _ => throw IndexOutOfBoundsException(n.toString)
+    }
+    override def setComputesElement(n : Int, v : Computes[_]) = n match {
+      case 0 => tuple = (v.asInstanceOf[Computes[T1]], tuple._2)
+      case 1 => tuple = (tuple._1, v.asInstanceOf[Computes[T2]])
+      case _ => throw IndexOutOfBoundsException(n.toString)
     }
 
-    def tryFold(parts : List[Computes[_]]) : Option[Computes[T]] = None
-    def flatten : Computes[(T1,T2)] =
+    override def tryFold = None
+    override def flatten = {
+      implicit val e1 = tuple._1.tType
+      implicit val e2 = tuple._2.tType
       ComputesExpr(List(tuple._1, tuple._2), ex => '{ (${ ex(0).asInstanceOf[Expr[T1]] }, ${ ex(1).asInstanceOf[Expr[T2]] }) })
       // expr(tuple : (Computes[T1],Computes[T2]), (etpl : (Expr[T1],Expr[T2])) => '{ (${ etpl._1 }, ${ etpl._2 }) })
+    }
   }
 
   implicit class ComputesTuple2Ops[T1 : Type, T2 : Type](lhs : Computes[(T1,T2)]) {
@@ -751,7 +916,7 @@ object Computes {
       ComputesSwitch(lhs, cases, None)
   }
 
-  def let[V,T : Type](value : Computes[V], body : Computes[V=>T]) : Computes[T] = body(value)
+  def let[V : Type,T : Type](value : Computes[V], body : Computes[V=>T]) : Computes[T] = body(value)
 
   def const[T : Type : Liftable](v : T) : Computes[T] =
     ComputesExpr(Nil, es => v.toExpr)
