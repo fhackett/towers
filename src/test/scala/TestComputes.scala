@@ -13,6 +13,6 @@ object ComputesTest extends App {
   //Predef.assert(doAdd1AddedL(2) == 5)
   //Predef.assert(doAdd1AddedR(2) == 5)
 
-  Predef.assert(doUnimapAdd1(List(1,2,3,4)) == List(2,3,4,5))
+  println(doUnimapAdd1(List(1,2,3,4)))
 }
 

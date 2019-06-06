@@ -40,6 +40,8 @@ sealed abstract class Computes[Tp : Type] {
   def tryFold : Option[Computes[T]]
 }
 
+opaque type ==>[Args, Result] = (Int,Array[Any])
+
 abstract class Computable[T : Type] extends Computes[T] {
   // translate this Computable into some lower-level implementation
   def flatten : Computes[T]
@@ -183,7 +185,7 @@ object Computes {
       fn : Computes[Arg1] => Computes[Result]
     )(implicit
       arg1 : ComputesVar[Arg1]
-    ) extends ComputesFunction[Arg1=>Result,Result](List(arg1), fn(arg1))
+    ) extends ComputesFunction[Arg1==>Result,Result](List(arg1), fn(arg1))
 
   implicit class ComputesFunction2[
     Arg1 : Type, Arg2 : Type,
@@ -192,7 +194,7 @@ object Computes {
     )(implicit
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2]
-    ) extends ComputesFunction[(Arg1,Arg2)=>Result,Result](List(arg1, arg2), fn(arg1, arg2))
+    ) extends ComputesFunction[(Arg1,Arg2)==>Result,Result](List(arg1, arg2), fn(arg1, arg2))
 
   implicit class ComputesFunction3[
     Arg1 : Type, Arg2 : Type, Arg3 : Type,
@@ -202,17 +204,17 @@ object Computes {
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2],
       arg3 : ComputesVar[Arg3]
-    ) extends ComputesFunction[(Arg1,Arg2,Arg3)=>Result,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
+    ) extends ComputesFunction[(Arg1,Arg2,Arg3)==>Result,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
 
-  implicit class ComputesApplication1[Arg1 : Type, Result : Type](fn : =>Computes[Arg1=>Result]) {
+  implicit class ComputesApplication1[Arg1 : Type, Result : Type](fn : =>Computes[Arg1==>Result]) {
     def apply(arg1 : Computes[Arg1]) : Computes[Result] = ComputesApplication(List(arg1), ref(fn))
   }
 
-  implicit class ComputesApplication2[Arg1 : Type, Arg2 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2)=>Result]) {
+  implicit class ComputesApplication2[Arg1 : Type, Arg2 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2)==>Result]) {
     def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2]) : Computes[Result] = ComputesApplication(List(arg1, arg2), ref(fn))
   }
 
-  implicit class ComputesApplication3[Arg1 : Type, Arg2 : Type, Arg3 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2,Arg3)=>Result]) {
+  implicit class ComputesApplication3[Arg1 : Type, Arg2 : Type, Arg3 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2,Arg3)==>Result]) {
     def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2], arg3 : Computes[Arg3]) : Computes[Result] =
       ComputesApplication(List(arg1, arg2, arg3), ref(fn))
   }
@@ -893,7 +895,7 @@ object Computes {
     impl(computes)
   }
 
-  def reifyCall[A1 : Type, R : Type](computes : Computes[(A1)=>R], a1 : Expr[A1])
+  def reifyCall[A1 : Type, R : Type](computes : Computes[A1==>R], a1 : Expr[A1])
                                     (implicit reflection : Reflection) = {
     reify(computes(expr((), _ => a1)))
   }
@@ -1016,7 +1018,7 @@ object Computes {
       ComputesSwitch(lhs, cases, None)
   }
 
-  def let[V : Type,T : Type](value : Computes[V], body : Computes[V=>T]) : Computes[T] = body(value)
+  def let[V : Type,T : Type](value : Computes[V], body : Computes[V==>T]) : Computes[T] = body(value)
 
   def const[T : Type : Liftable](v : T) : Computes[T] =
     ComputesExpr(Nil, es => v.toExpr)
@@ -1040,23 +1042,23 @@ object Computes {
 
 import Computes._
 
-val add1 : Computes[Int=>Int] =
+val add1 : Computes[Int==>Int] =
   (i : Computes[Int]) => i+const(1)
 
-val add2 : Computes[Int=>Int] =
+val add2 : Computes[Int==>Int] =
   (i : Computes[Int]) => add1(add1(i))
 
-val countdown : Computes[Int=>Boolean] =
+val countdown : Computes[Int==>Boolean] =
   (i : Computes[Int]) =>
     i.switch(
       List(const(0) -> const(true)),
       default=countdown(i-const(1)))
 
-val add1AddedL : Computes[Int=>Int] =
+val add1AddedL : Computes[Int==>Int] =
   (i : Computes[Int]) =>
     i + add1(i)
 
-val add1AddedR : Computes[Int=>Int] =
+val add1AddedR : Computes[Int==>Int] =
   (i : Computes[Int]) =>
     add1(i) + i
 
@@ -1072,8 +1074,8 @@ val add1AddedR : Computes[Int=>Int] =
                 const(false) ->
                   expr((fn(list.head), unimap((list.tail, fn))),
                     tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))))*/
-val unimap : Computes[(List[Int],Int=>Int)=>List[Int]] =
-  (list : Computes[List[Int]], fn : Computes[Int=>Int]) =>
+val unimap : Computes[(List[Int],Int==>Int)==>List[Int]] =
+  (list : Computes[List[Int]], fn : Computes[Int==>Int]) =>
     list.isEmpty.switch(
       List(
         const(true) -> expr((), _ => '{ Nil }),
@@ -1081,7 +1083,7 @@ val unimap : Computes[(List[Int],Int=>Int)=>List[Int]] =
           expr((fn(list.head), unimap(list.tail, fn)),
             tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))
 
-val unimapAdd1 : Computes[List[Int]=>List[Int]] =
+val unimapAdd1 : Computes[List[Int]==>List[Int]] =
   (list : Computes[List[Int]]) =>
     unimap(list, add1)
 
