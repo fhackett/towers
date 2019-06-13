@@ -784,15 +784,29 @@ object Computes {
                   Match(
                     vMap(c.argument.auxVar.key).unseal,
                     (for((v,r) <- c.cases)
-                      yield CaseDef(
-                        Pattern.Value(vMap(v.auxVar.key).unseal),
-                        None,
-                        outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection).unseal))
+                      yield {
+                        val bloodSacrifice = '{
+                          ${ vMap(c.argument.auxVar.key) } match {
+                            case x if x == ${ vMap(v.auxVar.key) } =>
+                              ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                          }
+                        }
+                        // more hack because I can't generate var bindings myself
+                        bloodSacrifice.unseal match {
+                          case IsInlined(inl) => inl.body match {
+                            case IsMatch(m) => m.cases.head
+                          }
+                        }
+                        /*CaseDef(
+                          Pattern.Value(vMap(v.auxVar.key).unseal),
+                          None,
+                          outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection).unseal)*/
+                      })
                     ++ default.map(d =>
                         List({
                           // hack: steal default branch from donor match expression
                           val bloodSacrifice = '{
-                            ??? match {
+                            ${ vMap(c.argument.auxVar.key) } match {
                               case _ => ${ d(pcMap, vMap, popData, pushData, pushPC, reflection) }
                             }
                           }
@@ -811,6 +825,7 @@ object Computes {
             bindSequence(c.parameters, closure, false,
               (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
                 val result = ${ c.exprFn(c.parameters.map(p => vMap(p.auxVar.key))) }
+                println(s"result $result")
                 ${
                   if cont != null then {
                     cont('{ result }, pcMap, vMap, popData, pushData, pushPC, reflection)
@@ -929,6 +944,8 @@ object Computes {
       pcStack.push(${ pcMap(rootKey).toExpr })
 
       while(!pcStack.isEmpty) {
+        println(s"d1 $dataStack")
+        println(s"pc $pcStack")
         ${
           Match(
             '{ pcStack.pop }.unseal,
@@ -947,6 +964,7 @@ object Computes {
             })).seal
         }
       }
+      println(s"d2 $dataStack")
       dataStack.pop.asInstanceOf[T]
     }
     println(expr.show) // DEBUG
