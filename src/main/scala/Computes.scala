@@ -40,8 +40,6 @@ sealed abstract class Computes[Tp : Type] {
   def tryFold : Option[Computes[T]]
 }
 
-opaque type ==>[Args, Result] = (Int,Array[Any])
-
 abstract class Computable[T : Type] extends Computes[T] {
   // translate this Computable into some lower-level implementation
   def flatten : Computes[T]
@@ -175,6 +173,14 @@ class ComputesSwitch[Arg, Result : Type](
 
 object Computes {
 
+  opaque type ==>[-Args <: Tuple, +Result] = (Int,Array[Any])
+
+  object ==>{
+    inline def getTuple[Args <: Tuple,Result](fn : ==>[Args,Result]) : (Int,Array[Any]) = fn
+  }
+
+  type |=>[-Args, +Result] = Tuple1[Args]==>Result
+
   implicit def freshVar[T : Type] : ComputesVar[T] = ComputesVar[T]()
 
   def ref[T : Type](computes : =>Computes[T]) : Computes[T] = ComputesLazyRef(computes)
@@ -185,7 +191,7 @@ object Computes {
       fn : Computes[Arg1] => Computes[Result]
     )(implicit
       arg1 : ComputesVar[Arg1]
-    ) extends ComputesFunction[Arg1==>Result,Result](List(arg1), fn(arg1))
+    ) extends ComputesFunction[Arg1|=>Result,Result](List(arg1), fn(arg1))
 
   implicit class ComputesFunction2[
     Arg1 : Type, Arg2 : Type,
@@ -206,7 +212,7 @@ object Computes {
       arg3 : ComputesVar[Arg3]
     ) extends ComputesFunction[(Arg1,Arg2,Arg3)==>Result,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
 
-  implicit class ComputesApplication1[Arg1 : Type, Result : Type](fn : =>Computes[Arg1==>Result]) {
+  implicit class ComputesApplication1[Arg1 : Type, Result : Type](fn : =>Computes[Arg1|=>Result]) {
     def apply(arg1 : Computes[Arg1]) : Computes[Result] = ComputesApplication(List(arg1), ref(fn))
   }
 
@@ -744,80 +750,94 @@ object Computes {
               }))
           }
           case c : ComputesSwitch[_,T] => {
-            implicit val e1 = c.tType
+            def thunk[AT,T](c : ComputesSwitch[AT,T], cont : Continuation[T]) : BasicBlock = {
+              implicit val e1 = c.tType
+              implicit val e2 = c.argument.tType
 
-            if cont != null then {
-              val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
-                val ret = ${ popData }.asInstanceOf[T]
-                ${
-                  val reverseClosure = closure.reverse
-                  bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
-                    print("switch clos "); print(vMap ++ vMap2); println(c)
-                    cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
-                  })
-                }
-              }))
-              blocks += block
-            }
-
-            val outputs = c.cases.map(c => c._2.key -> impl(c._2, closure, null)).toMap
-            val default = c.default.map(impl(_, closure, null))
-
-            val bodyClosure = c.cases.map(a => nodeClosures(a._2.key)).foldLeft(c.argument.auxVar :: closure)(orderedSetMerge)
-            bindSequence(c.argument :: c.cases.map(_._1), bodyClosure, true,
-              (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
-                ${
-                  if cont != null then '{
-                    ${ pushPC(pcMap(c.auxKey).toExpr) }
-                    ${
-                      closure.foldLeft('{})((acc, v) => '{
-                        ${ acc }
-                        ${ pushData(vMap(v.key)) }
-                      })
-                    }
-                  } else {
-                    '{}
+              if cont != null then {
+                val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+                  val ret = ${ popData }.asInstanceOf[T]
+                  ${
+                    val reverseClosure = closure.reverse
+                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
+                      print("switch clos "); print(vMap ++ vMap2); println(c)
+                      cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
+                    })
                   }
-                }
-                ${
-                  import reflection._
-                  Match(
-                    vMap(c.argument.auxVar.key).unseal,
-                    (for((v,r) <- c.cases)
-                      yield {
-                        val bloodSacrifice = '{
-                          ${ vMap(c.argument.auxVar.key) } match {
-                            case x if x == ${ vMap(v.auxVar.key) } =>
-                              ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection) }
-                          }
-                        }
-                        // more hack because I can't generate var bindings myself
-                        bloodSacrifice.unseal match {
-                          case IsInlined(inl) => inl.body match {
-                            case IsMatch(m) => m.cases.head
-                          }
-                        }
-                        /*CaseDef(
-                          Pattern.Value(vMap(v.auxVar.key).unseal),
-                          None,
-                          outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection).unseal)*/
-                      })
-                    ++ default.map(d =>
-                        List({
-                          // hack: steal default branch from donor match expression
+                }))
+                blocks += block
+              }
+
+              val outputs = c.cases.map(c => c._2.key -> impl(c._2, closure, null)).toMap
+              val default = c.default.map(impl(_, closure, null))
+
+              val bodyClosure = c.cases.map(a => nodeClosures(a._2.key)).foldLeft(c.argument.auxVar :: closure)(orderedSetMerge)
+              bindSequence(c.argument :: c.cases.map(_._1), bodyClosure, true,
+                (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+                  ${
+                    if cont != null then '{
+                      ${ pushPC(pcMap(c.auxKey).toExpr) }
+                      ${
+                        closure.foldLeft('{})((acc, v) => '{
+                          ${ acc }
+                          ${ pushData(vMap(v.key)) }
+                        })
+                      }
+                    } else {
+                      '{}
+                    }
+                  }
+                  ${
+                    import reflection._
+                    val bloodSacrifice = '{
+                      ${ vMap(c.argument.auxVar.key).asInstanceOf[Expr[AT]] } match {
+                        case _ => ()
+                      }
+                    }/*
+                    val scrutinee = bloodSacrifice.unseal match {
+                      case IsInlined(inl) => inl.body match {
+                        case IsMatch(m) => m.scrutinee
+                      }
+                    }*/
+                    Match(
+                      vMap(c.argument.auxVar.key).unseal,
+                      (for((v,r) <- c.cases)
+                        yield {
                           val bloodSacrifice = '{
                             ${ vMap(c.argument.auxVar.key) } match {
-                              case _ => ${ d(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                              case x if x == ${ vMap(v.auxVar.key) } =>
+                                ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection) }
                             }
                           }
+                          // more hack because I can't generate var bindings myself
                           bloodSacrifice.unseal match {
                             case IsInlined(inl) => inl.body match {
                               case IsMatch(m) => m.cases.head
                             }
                           }
-                        })).getOrElse(Nil)).seal.cast[Unit]
-                }
-              })
+                          /*CaseDef(
+                            Pattern.Value(vMap(v.auxVar.key).unseal),
+                            None,
+                            outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection).unseal)*/
+                        })
+                      ++ default.map(d =>
+                          List({
+                            // hack: steal default branch from donor match expression
+                            val bloodSacrifice = '{
+                              ${ vMap(c.argument.auxVar.key).asInstanceOf[Expr[AT]] } match {
+                                case _ => ${ d(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                              }
+                            }
+                            bloodSacrifice.unseal match {
+                              case IsInlined(inl) => inl.body match {
+                                case IsMatch(m) => m.cases.head
+                              }
+                            }
+                          })).getOrElse(Nil)).seal.cast[Unit]
+                  }
+                })
+            }
+            thunk(c, cont)
           }
           case c : ComputesExpr[T] => {
             implicit val e1 = c.tType
@@ -910,7 +930,7 @@ object Computes {
     impl(computes)
   }
 
-  def reifyCall[A1 : Type, R : Type](computes : Computes[A1==>R], a1 : Expr[A1])
+  def reifyCall[A1 : Type, R : Type](computes : Computes[A1|=>R], a1 : Expr[A1])
                                     (implicit reflection : Reflection) = {
     reify(computes(expr((), _ => a1)))
   }
@@ -1036,7 +1056,7 @@ object Computes {
       ComputesSwitch(lhs, cases, None)
   }
 
-  def let[V : Type,T : Type](value : Computes[V], body : Computes[V==>T]) : Computes[T] = body(value)
+  def let[V : Type,T : Type](value : Computes[V], body : Computes[V|=>T]) : Computes[T] = body(value)
 
   def const[T : Type : Liftable](v : T) : Computes[T] =
     ComputesExpr(Nil, es => v.toExpr)
@@ -1060,23 +1080,23 @@ object Computes {
 
 import Computes._
 
-val add1 : Computes[Int==>Int] =
+val add1 : Computes[Int|=>Int] =
   (i : Computes[Int]) => i+const(1)
 
-val add2 : Computes[Int==>Int] =
+val add2 : Computes[Int|=>Int] =
   (i : Computes[Int]) => add1(add1(i))
 
-val countdown : Computes[Int==>Boolean] =
+val countdown : Computes[Int|=>Boolean] =
   (i : Computes[Int]) =>
     i.switch(
       List(const(0) -> const(true)),
       default=countdown(i-const(1)))
 
-val add1AddedL : Computes[Int==>Int] =
+val add1AddedL : Computes[Int|=>Int] =
   (i : Computes[Int]) =>
     i + add1(i)
 
-val add1AddedR : Computes[Int==>Int] =
+val add1AddedR : Computes[Int|=>Int] =
   (i : Computes[Int]) =>
     add1(i) + i
 
@@ -1092,8 +1112,8 @@ val add1AddedR : Computes[Int==>Int] =
                 const(false) ->
                   expr((fn(list.head), unimap((list.tail, fn))),
                     tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))))*/
-val unimap : Computes[(List[Int],Int==>Int)==>List[Int]] =
-  (list : Computes[List[Int]], fn : Computes[Int==>Int]) =>
+val unimap : Computes[(List[Int],Int|=>Int)==>List[Int]] =
+  (list : Computes[List[Int]], fn : Computes[Int|=>Int]) =>
     list.isEmpty.switch(
       List(
         const(true) -> expr((), _ => '{ Nil }),
@@ -1101,7 +1121,7 @@ val unimap : Computes[(List[Int],Int==>Int)==>List[Int]] =
           expr((fn(list.head), unimap(list.tail, fn)),
             tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))
 
-val unimapAdd1 : Computes[List[Int]==>List[Int]] =
+val unimapAdd1 : Computes[List[Int]|=>List[Int]] =
   (list : Computes[List[Int]]) =>
     unimap(list, add1)
 
