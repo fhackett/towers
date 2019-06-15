@@ -268,7 +268,9 @@ object Computes {
     val substitutions = HashMap[Computes[_],Computes[_]]()
 
     def impl[T](computes : Computes[T]) : Computes[T] = {
-      if substitutions.contains(computes) then {
+      if computes.key_ != NoKey then {
+        computes // this should only be reachable if we're cloning the result of a tryFold
+      } else if substitutions.contains(computes) then {
         substitutions(computes).asInstanceOf[Computes[T]]
       } else {
         computes match {
@@ -493,7 +495,7 @@ object Computes {
     rewrite(computes, new {
       def apply[T](computes : Computes[T], rec : Computes[T]=>Computes[T], reachedSet : Set[ComputesKey]) : Computes[T] =
         computes.implTryFold match {
-          case Some(folded) => rec(eliminateLazyRefs(folded, reachedSet))
+          case Some(folded) => rec(eliminateLazyRefs(Computes.clone(folded), reachedSet))
           case None => computes
         }
     })
@@ -502,7 +504,7 @@ object Computes {
     rewrite(computes, new {
       def apply[T](computes : Computes[T], rec : Computes[T]=>Computes[T], reachedSet : Set[ComputesKey]) : Computes[T] =
         computes match {
-          case c : Computable[_] => rec(eliminateLazyRefs(c.flatten, reachedSet))
+          case c : Computable[_] => rec(eliminateLazyRefs(Computes.clone(c.flatten), reachedSet))
           case c => c
         }
     })
