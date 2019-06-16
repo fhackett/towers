@@ -14,5 +14,7 @@ object ComputesTest extends App {
   Predef.assert(doAdd1AddedR(2) == 5)
 
   println(doUnimapAdd1(List(1,2,3,4)))
+
+  println(doUnimap2Add1(List(1,2,3,4)))
 }
 

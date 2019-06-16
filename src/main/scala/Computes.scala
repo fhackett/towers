@@ -439,9 +439,10 @@ object Computes {
       } else {
         computes match {
           case c : ComputesByKey[T] => {
-            Predef.assert(c.binding != null)
-            substitutions(computes.key) = c
-            c.binding = impl(c.binding)
+            if c.binding != null then { // if binding is null we are in a recursive call that will eventually set binding
+              substitutions(computes.key) = c
+              c.binding = impl(c.binding)
+            }
             c
           }
           case _ => {
@@ -456,6 +457,7 @@ object Computes {
             if isRecursive(indirect.key) then {
               indirect.binding = result
               substitutions(computes.key) = indirect.binding
+              substitutions(indirect.key) = indirect
               indirect
             } else {
               substitutions(computes.key) = result
@@ -736,7 +738,15 @@ object Computes {
               println(s"CLOS ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
               val refs = nodeClosures(c.key).map(v => vMap(v.key))
               val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then
-                Apply(Ref(definitions.Array_apply), refs.map(_.unseal)).seal.cast[Array[Any]]
+                '{
+                  val clos = new Array[Any](${ refs.length.toExpr })
+                  ${
+                    refs.zipWithIndex.foldLeft('{})((acc, tp) => tp match {
+                      case (ref, i) => '{ clos(${ i.toExpr }) = ${ ref }; ${ acc } }
+                    })
+                  }
+                  clos
+                }
               else
                 '{ null }
               '{
@@ -1022,7 +1032,7 @@ object Computes {
 
     override def shallowClone = ComputesTuple2(tuple)
 
-    override def computesArity = 0
+    override def computesArity = 2
     override def getComputesElement(n : Int) : Computes[_] = n match {
       case 0 => tuple._1
       case 1 => tuple._2
@@ -1110,18 +1120,6 @@ val add1AddedR : Computes[Int|=>Int] =
   (i : Computes[Int]) =>
     add1(i) + i
 
-/*val unimap : Computes[((List[Int],Int=>Int))=>List[Int]] =
-  (args : Computes[(List[Int],Int=>Int)]) =>
-    let(expr(args, args => '{ ${ args }._1 }),
-      (list : Computes[List[Int]]) =>
-        let(expr(args, args => '{ ${ args }._2 }),
-          (fn : Computes[Int=>Int]) =>
-            list.isEmpty.switch(
-              List(
-                const(true) -> expr((), _ => '{ Nil }),
-                const(false) ->
-                  expr((fn(list.head), unimap((list.tail, fn))),
-                    tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))))*/
 val unimap : Computes[(List[Int],Int|=>Int)==>List[Int]] =
   (list : Computes[List[Int]], fn : Computes[Int|=>Int]) =>
     list.isEmpty.switch(
@@ -1131,9 +1129,26 @@ val unimap : Computes[(List[Int],Int|=>Int)==>List[Int]] =
           expr((fn(list.head), unimap(list.tail, fn)),
             tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))
 
+val unimap2 : Computes[(List[Int],Int|=>Int)|=>List[Int]] =
+  (args : Computes[(List[Int],Int|=>Int)]) =>
+    let(expr(args, args => '{ ${ args }._1 }),
+      (list : Computes[List[Int]]) =>
+        let(expr(args, args => '{ ${ args }._2 }),
+          (fn : Computes[Int|=>Int]) =>
+            list.isEmpty.switch(
+              List(
+                const(true) -> expr((), _ => '{ Nil }),
+                const(false) ->
+                  expr((fn(list.head), unimap2((list.tail, fn))),
+                    tpl => tpl match { case (mhd,mtl) => '{ ${ mhd } :: ${ mtl } } })))))
+
 val unimapAdd1 : Computes[List[Int]|=>List[Int]] =
   (list : Computes[List[Int]]) =>
     unimap(list, add1)
+
+val unimap2Add1 : Computes[List[Int]|=>List[Int]] =
+  (list : Computes[List[Int]]) =>
+    unimap2((list, add1))
 
 inline def doAdd1(i : Int) : Int = ${ Computes.reifyCall(add1, '{ i }) }
 
@@ -1146,4 +1161,6 @@ inline def doAdd1AddedL(i : Int) : Int = ${ Computes.reifyCall(add1AddedL, '{ i 
 inline def doAdd1AddedR(i : Int) : Int = ${ Computes.reifyCall(add1AddedR, '{ i }) }
 
 inline def doUnimapAdd1(list : List[Int]) : List[Int] = ${ Computes.reifyCall(unimapAdd1, '{ list }) }
+
+inline def doUnimap2Add1(list : List[Int]) : List[Int] = ${ Computes.reifyCall(unimap2Add1, '{ list }) }
 
