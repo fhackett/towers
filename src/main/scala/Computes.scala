@@ -14,8 +14,7 @@ trait KeySrc {
   def freshKey() : ComputesKey
 }
 
-sealed abstract class Computes[Tp : Type] {
-  type T = Tp
+sealed abstract class Computes[T : Type] {
   val tType = implicitly[Type[T]]
 
   private[computes] var key_ = NoKey
@@ -32,10 +31,10 @@ sealed abstract class Computes[Tp : Type] {
     }
     auxKey_
   }
-  val auxVar : ComputesVar[Tp]
+  val auxVar : ComputesVar[T]
 
   // we use object identity, so sometimes we need an identical but different object
-  def shallowClone : Computes[Tp]
+  def shallowClone : Computes[T]
 
   // mutable Product - used internally
   def setComputesElement(n : Int, v : Computes[_]) : Unit
@@ -114,7 +113,7 @@ class ComputesExpr[T : Type](var parameters : List[Computes[_]], val exprFn : Li
 }
 
 class ComputesApplication[FnType, Result : Type](var arguments : List[Computes[_]], var function : Computes[FnType]) extends Computes[Result] {
-  val auxVar = ComputesVar[T]()
+  val auxVar = ComputesVar[Result]()
   override def shallowClone = ComputesApplication(arguments, function)
   override def setComputesElement(n : Int, v : Computes[_]) =
     if n == arguments.length then
@@ -151,7 +150,7 @@ class ComputesLazyRef[T : Type](ref : =>Computes[T]) extends Computes[T] {
 }
 
 class ComputesFunction[FnType : Type, Result : Type](val parameters : List[ComputesVar[_]], var body : Computes[Result]) extends Computes[FnType] {
-  val auxVar = ComputesVar[T]()
+  val auxVar = ComputesVar[FnType]()
   override def shallowClone = ComputesFunction(parameters, body) // TODO: renaming
   override def setComputesElement(n : Int, v : Computes[_]) = n match {
     case 0 => body = v.asInstanceOf[Computes[Result]]
@@ -170,7 +169,7 @@ class ComputesSwitch[Arg, Result : Type](
   var cases : List[(Computes[Arg],Computes[Result])],
   var default : Option[Computes[Result]]
 ) extends Computes[Result] {
-  val auxVar = ComputesVar[T]()
+  val auxVar = ComputesVar[Result]()
   def toList : List[Computes[_]] =
     List(argument) ++ cases.flatMap((tpl : (Computes[Arg],Computes[Result])) => List(tpl._1,tpl._2)) ++ default.map(List(_)).getOrElse(List.empty)
   def fromList(list : List[Computes[_]]) = {
@@ -544,10 +543,10 @@ object Computes {
       def bindVars(names : List[ComputesVar[_]], values : List[Expr[_]], reflection : Reflection, scope : Map[ComputesKey,Expr[_]]=>Expr[Unit]) : Expr[Unit] = {
         def doIt(nv : List[(ComputesVar[_],Expr[_])], vMap : Map[ComputesKey,Expr[_]]) : Expr[Unit] = nv match {
           case Nil => scope(vMap)
-          case (name, v) :: tl => {
+          case (name : ComputesVar[t], v) :: tl => {
             implicit val e1 = name.tType
             '{
-              val bind = ${ v.asInstanceOf[Expr[name.T]] }
+              val bind = ${ v.asInstanceOf[Expr[t]] }
               ${ doIt(tl, vMap + ((name.key, '{ bind }))) }
             }
           }
