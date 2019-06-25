@@ -192,11 +192,7 @@ class ComputesSwitch[Arg, Result : Type](
 
 object Computes {
 
-  opaque type ==>[-Args <: Tuple, +Result] = (Int,Array[Any])
-
-  object ==>{
-    inline def getTuple[Args <: Tuple,Result](fn : ==>[Args,Result]) : (Int,Array[Any]) = fn
-  }
+  class ==>[-Args <: Tuple, +Result](val pc : Int, val closure : Array[Any])
 
   type |=>[-Args, +Result] = Tuple1[Args]==>Result
 
@@ -206,42 +202,78 @@ object Computes {
 
   implicit class ComputesFunction1[
     Arg1 : Type,
-    Result : Type](
+    Result : Type,
+    F <: Arg1|=>Result : Type](
       fn : Computes[Arg1] => Computes[Result]
     )(implicit
       arg1 : ComputesVar[Arg1]
-    ) extends ComputesFunction[Arg1|=>Result,Result](List(arg1), fn(arg1))
+    ) extends ComputesFunction[F,Result](List(arg1), fn(arg1))
 
   implicit class ComputesFunction2[
     Arg1 : Type, Arg2 : Type,
-    Result : Type](
+    Result : Type,
+    F <: (Arg1,Arg2)==>Result : Type](
       fn : (Computes[Arg1], Computes[Arg2]) => Computes[Result]
     )(implicit
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2]
-    ) extends ComputesFunction[(Arg1,Arg2)==>Result,Result](List(arg1, arg2), fn(arg1, arg2))
+    ) extends ComputesFunction[F,Result](List(arg1, arg2), fn(arg1, arg2))
 
   implicit class ComputesFunction3[
     Arg1 : Type, Arg2 : Type, Arg3 : Type,
-    Result : Type](
+    Result : Type,
+    F <: (Arg1,Arg2,Arg3)==>Result : Type](
       fn : (Computes[Arg1], Computes[Arg2], Computes[Arg3]) => Computes[Result]
     )(implicit
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2],
       arg3 : ComputesVar[Arg3]
-    ) extends ComputesFunction[(Arg1,Arg2,Arg3)==>Result,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
+    ) extends ComputesFunction[F,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
 
-  implicit class ComputesApplication1[Arg1 : Type, Result : Type](fn : =>Computes[Arg1|=>Result]) {
+  implicit class ComputesFunction4[
+    Arg1 : Type, Arg2 : Type, Arg3 : Type, Arg4 : Type,
+    Result : Type,
+    F <: (Arg1,Arg2,Arg3,Arg4)==>Result : Type](
+      fn : (Computes[Arg1], Computes[Arg2], Computes[Arg3], Computes[Arg4]) => Computes[Result]
+    )(implicit
+      arg1 : ComputesVar[Arg1],
+      arg2 : ComputesVar[Arg2],
+      arg3 : ComputesVar[Arg3],
+      arg4 : ComputesVar[Arg4]
+    ) extends ComputesFunction[F,Result](List(arg1, arg2, arg3, arg4), fn(arg1, arg2, arg3, arg4))
+
+  implicit class ComputesApplication1[
+      Arg1 : Type,
+      Result : Type,
+      F <: Arg1|=>Result : Type]
+      (fn : =>Computes[F]) {
     def apply(arg1 : Computes[Arg1]) : Computes[Result] = ComputesApplication(List(arg1), ref(fn))
   }
 
-  implicit class ComputesApplication2[Arg1 : Type, Arg2 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2)==>Result]) {
+  implicit class ComputesApplication2[
+      Arg1 : Type, Arg2 : Type,
+      Result : Type,
+      F <: (Arg1,Arg2)==>Result : Type]
+      (fn : =>Computes[F]) {
     def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2]) : Computes[Result] = ComputesApplication(List(arg1, arg2), ref(fn))
   }
 
-  implicit class ComputesApplication3[Arg1 : Type, Arg2 : Type, Arg3 : Type, Result : Type](fn : =>Computes[(Arg1,Arg2,Arg3)==>Result]) {
+  implicit class ComputesApplication3[
+      Arg1 : Type, Arg2 : Type, Arg3 : Type,
+      Result : Type,
+      F <: (Arg1,Arg2,Arg3)==>Result : Type]
+      (fn : =>Computes[F]) {
     def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2], arg3 : Computes[Arg3]) : Computes[Result] =
       ComputesApplication(List(arg1, arg2, arg3), ref(fn))
+  }
+
+  implicit class ComputesApplication4[
+      Arg1 : Type, Arg2 : Type, Arg3 : Type, Arg4 : Type,
+      Result : Type,
+      F <: (Arg1,Arg2,Arg3,Arg4)==>Result : Type]
+      (fn : =>Computes[F]) {
+    def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2], arg3 : Computes[Arg3], arg4 : Computes[Arg4]) : Computes[Result] =
+      ComputesApplication(List(arg1, arg2, arg3, arg4), ref(fn))
   }
 
   def eliminateLazyRefs[T](computes : Computes[T], vSet : Set[ComputesKey] = Set.empty)(implicit keySrc : KeySrc) : Computes[T] = {
@@ -483,7 +515,7 @@ object Computes {
     rewrite(computes, new {
       def apply[T](computes : Computes[T], rec : Computes[T]=>Computes[T], reachedSet : Set[ComputesKey]) : Computes[T] =
         computes match {
-          case c : Computable[_] => rec(eliminateLazyRefs(Computes.clone(c.flatten), reachedSet))
+          case c : Computable[T] => rec(eliminateLazyRefs(Computes.clone(c.flatten), reachedSet))
           case c => c
         }
     })
@@ -695,9 +727,9 @@ object Computes {
                   '{}
                 }
               }
-              val fnV = ${ fn }.asInstanceOf[(Int,Array[Any])]
-              ${ pushPC('{ fnV._1 }) }
-              ${ pushData('{ fnV._2 }) }
+              val fnV = ${ fn }.asInstanceOf[==>[_,_]]
+              ${ pushPC('{ fnV.pc }) }
+              ${ pushData('{ fnV.closure }) }
               ${
                 if !c.arguments.isEmpty then
                   argBlocks(c.arguments.head.key)(pcMap, vMap, popData, pushData, pushPC, reflection)
@@ -749,7 +781,7 @@ object Computes {
               else
                 '{ null }
               '{
-                val fn = (${ pcMap(c.body.key).toExpr }, ${ closureExpr })
+                val fn = ==>(${ pcMap(c.body.key).toExpr }, ${ closureExpr })
                 ${
                   print("ffn "); print(vMap); println(c)
                   if cont != null then
@@ -1048,7 +1080,7 @@ object Computes {
       implicit val e1 = tuple._1.tType
       implicit val e2 = tuple._2.tType
       ComputesExpr(List(tuple._1, tuple._2), ex => '{ (${ ex(0).asInstanceOf[Expr[T1]] }, ${ ex(1).asInstanceOf[Expr[T2]] }) })
-      // expr(tuple : (Computes[T1],Computes[T2]), (etpl : (Expr[T1],Expr[T2])) => '{ (${ etpl._1 }, ${ etpl._2 }) })
+      //expr(tuple : (Computes[T1],Computes[T2]), (etpl : (Expr[T1],Expr[T2])) => '{ (${ etpl._1 }, ${ etpl._2 }) })
     }
   }
 
