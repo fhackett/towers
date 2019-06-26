@@ -382,12 +382,12 @@ object Computes {
 
     findRequiredClones(computes, Set.empty)
     findRequiredClones(computes, Set.empty)
-    println(s"bindings $bindings")
-    println(s"shouldClone $shouldClone")
+    //println(s"bindings $bindings")
+    //println(s"shouldClone $shouldClone")
 
     val substitutions = HashMap[ComputesKey,Computes[_]]()
     def impl[T](computes : Computes[T]) : Computes[T] = {
-      println(s"subKey ${computes.key} ${computes}")
+      //println(s"subKey ${computes.key} ${computes}")
       if substitutions.contains(computes.key) then {
         substitutions(computes.key).asInstanceOf[Computes[T]]
       } else if !shouldClone(computes.key) then {
@@ -399,6 +399,7 @@ object Computes {
           case c : ComputesByKey[T] => {
             if c.binding != null then {
               val clone = ComputesByKey[T](null)(c.tType)
+              clone.key // ensure key is set
               substitutions(c.key) = clone
               clone.binding = impl(c.binding)
               clone
@@ -460,7 +461,7 @@ object Computes {
         substitutions(computes.key).asInstanceOf[Computes[T]] match {
           case c : ComputesByKey[T] => {
             if c.binding == null then {
-              println(s"foundRecursive ${computes.key} ${computes} ${c.key}")
+              //println(s"foundRecursive ${computes.key} ${computes} ${c.key}")
               isRecursive += c.key
             }
             c
@@ -484,7 +485,7 @@ object Computes {
               computes.setComputesElement(i, impl(computes.getComputesElement(i)))
             }
             val result = action(computes, impl(_), substitutions.keySet.toSet)
-            println(s"actionResult ${computes.key} ${result.key} ${result}")
+            //println(s"actionResult ${computes.key} ${result.key} ${result}")
             if isRecursive(indirect.key) then {
               indirect.binding = result
               substitutions(computes.key) = indirect.binding
@@ -549,7 +550,7 @@ object Computes {
                   impl(c.body).filter(v => v.key != c.name.key))
               case c : ComputesFunction[_,T] => {
                 val params = c.parameters.map(v => v.key).toSet
-                println(s"PARAMS ${params}")
+                //println(s"PARAMS ${params}")
                 impl(c.body).filter(v => !params(v.key))
               }
               case c =>
@@ -619,7 +620,7 @@ object Computes {
 
       // if cont is null, just skip that part and leave whatever you were going to pass to it on the data stack
       def impl[T](computes : Computes[T], closure : List[ComputesVar[_]], cont : Continuation[T]) : BasicBlock = {
-        print("CL "); print(computes); print(" "); print(closure); print(" || "); println(nodeClosures(computes.key).map(_.key))
+        //print("CL "); print(computes); print(" "); print(closure); print(" || "); println(nodeClosures(computes.key).map(_.key))
         val result : BasicBlock = computes match {
           case c : ComputesByKey[T] =>
             c.binding match {
@@ -632,7 +633,7 @@ object Computes {
                   val reverseClosure = nodeClosures(c.binding.key).reverse
                   blocks += ((c.binding.key, (pcMap, vMap, popData, pushData, pushPC, reflection) => {
                     bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
-                      print("l clos "); print(vMap ++ vMap2); println(c)
+                      //print("l clos "); print(vMap ++ vMap2); println(c)
                       body(pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
                     })
                   }))
@@ -652,7 +653,7 @@ object Computes {
                 }
                 (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
                   ${
-                    print("l pre "); print(vMap); println(c)
+                    //print("l pre "); print(vMap); println(c)
                     if cont != null then {
                       pushClosure(closure.map(v => vMap(v.key)), pushData, reflection, pushPC(pcMap(c.auxKey).toExpr))
                     } else {
@@ -669,7 +670,7 @@ object Computes {
             }
           case c : ComputesVar[T] => {
             (pcMap, vMap, popData, pushData, pushPC, reflection) => {
-              print("v "); print(vMap); println(c.key)
+              //print("v "); print(vMap); println(c.key)
               if cont == null then
                 pushData(vMap(c.key))
               else
@@ -685,7 +686,7 @@ object Computes {
                 ${
                   val reverseClosure = closure.reverse
                   bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
-                    print("app clos "); print(vMap ++ vMap2); println(c)
+                    //print("app clos "); print(vMap ++ vMap2); println(c)
                     cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
                   })
                 }
@@ -702,14 +703,14 @@ object Computes {
                 if nextKey != NoKey then {
                   (argVal, pcMap, vMap, popData, pushData, pushPC, reflection) => '{
                     ${
-                      print("arg "); print(vMap); println(arg)
+                      //print("arg "); print(vMap); println(arg)
                       pushData(argVal)
                     }
                     ${ argBlocks(nextKey)(pcMap, vMap, popData, pushData, pushPC, reflection) }
                   }
                 } else null)
               argBlocks(arg.key) = (pcMap, vMap, popData, pushData, pushPC, reflection) => {
-                print("arg pre "); print(vMap); println(arg)
+                //print("arg pre "); print(vMap); println(arg)
                 b(pcMap, vMap, popData, pushData, pushPC, reflection)
               }
               arg.key
@@ -719,7 +720,7 @@ object Computes {
             impl(c.function, fullClosure, (fn, pcMap, vMap, popData, pushData, pushPC, reflection) => '{
               // if we have a continuation then push block to return to, else we are a leaf call
               ${
-                print("app "); print(vMap); println(c)
+                //print("app "); print(vMap); println(c)
                 if cont != null then {
                   // push locals left to right
                   pushClosure(closure.map(v => vMap(v.key)), pushData, reflection, pushPC(pcMap(c.auxKey).toExpr))
@@ -749,14 +750,14 @@ object Computes {
                 bindVars(reverseParams, reverseParams.map(p => '{ ${ popData }.asInstanceOf[${ p.tType }] }), reflection, vMap2 => '{
                   val closureVal = ${ popData }.asInstanceOf[Array[Any]]
                   ${
-                    print("fn args "); print(vMap ++ vMap2); println(c)
+                    //print("fn args "); print(vMap ++ vMap2); println(c)
                     bindVars(
                       fClosure,
                       for((v, i) <- fClosure.zipWithIndex)
                         yield '{ closureVal(${ i.toExpr }).asInstanceOf[${ v.tType }] },
                       reflection,
                       vMap3 => {
-                        print("fn clos "); print(vMap3); println(c)
+                        //print("fn clos "); print(vMap3); println(c)
                         body(pcMap, vMap ++ vMap2 ++ vMap3, popData, pushData, pushPC, reflection)
                       })
                   }
@@ -766,7 +767,7 @@ object Computes {
             }
             (pcMap, vMap, popData, pushData, pushPC, reflection) => {
               import reflection._
-              println(s"CLOS ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
+              //println(s"CLOS ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
               val refs = nodeClosures(c.key).map(v => vMap(v.key))
               val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then
                 '{
@@ -783,7 +784,7 @@ object Computes {
               '{
                 val fn = ==>(${ pcMap(c.body.key).toExpr }, ${ closureExpr })
                 ${
-                  print("ffn "); print(vMap); println(c)
+                  //print("ffn "); print(vMap); println(c)
                   if cont != null then
                     cont('{ fn }.asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC, reflection)
                   else
@@ -796,7 +797,7 @@ object Computes {
             val body = impl(c.body, closure, cont)
             impl(c.value, closure, (value, pcMap, vMap, popData, pushData, pushPC, reflection) => 
               bindVars(List(c.name), List(value), reflection, vMap2 => {
-                print("bind "); print(vMap ++ vMap2); println(c)
+                //print("bind "); print(vMap ++ vMap2); println(c)
                 body(pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
               }))
           }
@@ -811,7 +812,7 @@ object Computes {
                   ${
                     val reverseClosure = closure.reverse
                     bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
-                      print("switch clos "); print(vMap ++ vMap2); println(c)
+                      //print("switch clos "); print(vMap ++ vMap2); println(c)
                       cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
                     })
                   }
@@ -896,7 +897,7 @@ object Computes {
             bindSequence(c.parameters, closure, false,
               (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
                 val result = ${ c.exprFn(c.parameters.map(p => vMap(p.auxVar.key))) }
-                println(s"result $result")
+                //println(s"result $result")
                 ${
                   if cont != null then {
                     cont('{ result }, pcMap, vMap, popData, pushData, pushPC, reflection)
@@ -988,22 +989,22 @@ object Computes {
       }
     }
     println("RAW")
-    printComputes(computes)
+    //printComputes(computes)
     val cloned = clone(computes)
     println("CLONED")
-    printComputes(cloned)
+    //printComputes(cloned)
     val noLazy = eliminateLazyRefs(cloned)
     println("NOLAZY")
-    printComputes(noLazy)
+    //printComputes(noLazy)
     val inlinedComputes = performInlining(noLazy)
     println("INLINE1")
-    printComputes(inlinedComputes)
+    //printComputes(inlinedComputes)
     val flattenedComputes = flatten(inlinedComputes)
     println("FLATTENED")
-    printComputes(flattenedComputes)
+    //printComputes(flattenedComputes)
     val inlinedComputes2 = performInlining(flattenedComputes)
     println("INLINE2")
-    printComputes(inlinedComputes2)
+    //printComputes(inlinedComputes2)
 
     val rootKey = inlinedComputes2.key
     val basicBlocks = getBasicBlocks(inlinedComputes2)
@@ -1041,8 +1042,9 @@ object Computes {
       println(s"d2 $dataStack")
       dataStack.pop.asInstanceOf[T]
     }
-    println(expr.show) // DEBUG
-    expr
+    println(expr.unseal) // DEBUG
+    //expr
+    '{ ??? }
   }
 
   // problem: even if the input expression is globally reachable, we can't tell here because of how
@@ -1050,6 +1052,14 @@ object Computes {
   /* implicit class ComputesFnCallCompiler[Arg, Result](inline computes : Computes[Arg=>Result]) {
     inline def reifyCall(arg : Arg) : Result = ${ reifyCallImpl(computes, '{arg}) }
   } */
+  
+  implicit object LiftableNull extends Liftable[Null] {
+    def toExpr(x : Null) = '{ null }
+  }
+
+  implicit object LiftableUnit extends Liftable[Unit] {
+    def toExpr(x : Unit) = '{ () }
+  }
   
   implicit class ComputesIntOps(lhs : Computes[Int]) {
     def +(rhs : Computes[Int]) : Computes[Int] =

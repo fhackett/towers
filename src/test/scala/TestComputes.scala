@@ -1,8 +1,8 @@
-package test.towers.computes
+package towers.computes.test
 
 import towers.computes._
 
-object ComputesTest extends App {
+object TestComputes extends App {
 
   Predef.assert(doAdd1(2) == 3)
 
