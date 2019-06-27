@@ -18,7 +18,7 @@ sealed abstract class Computes[T : Type] {
   val tType = implicitly[Type[T]]
 
   private[computes] var key_ = NoKey
-  private var auxKey_ = NoKey
+  private[computes] var auxKey_ = NoKey
   def key(implicit keySrc : KeySrc) = {
     if key_ == NoKey then {
       key_ = keySrc.freshKey()
@@ -149,9 +149,9 @@ class ComputesLazyRef[T : Type](ref : =>Computes[T]) extends Computes[T] {
   override def tryFold = ???
 }
 
-class ComputesFunction[FnType : Type, Result : Type](val parameters : List[ComputesVar[_]], var body : Computes[Result]) extends Computes[FnType] {
+class ComputesFunction[FnType <: Computes.==>[_,Result] : Type, Result : Type](val inst : Computes.FnInst[FnType], val parameters : List[ComputesVar[_]], var body : Computes[Result]) extends Computes[FnType] {
   val auxVar = ComputesVar[FnType]()
-  override def shallowClone = ComputesFunction(parameters, body) // TODO: renaming
+  override def shallowClone = ComputesFunction(inst, parameters, body)
   override def setComputesElement(n : Int, v : Computes[_]) = n match {
     case 0 => body = v.asInstanceOf[Computes[Result]]
     case _ => throw IndexOutOfBoundsException(n.toString)
@@ -194,6 +194,14 @@ object Computes {
 
   class ==>[-Args <: Tuple, +Result](val pc : Int, val closure : Array[Any])
 
+  trait FnInst[F <: (_==>_)] {
+    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) : Expr[F]
+  }
+
+  implicit def Inst_==>[A <: Tuple,R] : FnInst[A==>R] = new {
+    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) = '{ ==>(${ pc }, ${ closure }) }
+  }
+
   type |=>[-Args, +Result] = Tuple1[Args]==>Result
 
   implicit def freshVar[T : Type] : ComputesVar[T] = ComputesVar[T]()
@@ -206,8 +214,9 @@ object Computes {
     F <: Arg1|=>Result : Type](
       fn : Computes[Arg1] => Computes[Result]
     )(implicit
+      inst : FnInst[F],
       arg1 : ComputesVar[Arg1]
-    ) extends ComputesFunction[F,Result](List(arg1), fn(arg1))
+    ) extends ComputesFunction[F,Result](inst, List(arg1), fn(arg1))
 
   implicit class ComputesFunction2[
     Arg1 : Type, Arg2 : Type,
@@ -215,9 +224,10 @@ object Computes {
     F <: (Arg1,Arg2)==>Result : Type](
       fn : (Computes[Arg1], Computes[Arg2]) => Computes[Result]
     )(implicit
+      inst : FnInst[F],
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2]
-    ) extends ComputesFunction[F,Result](List(arg1, arg2), fn(arg1, arg2))
+    ) extends ComputesFunction[F,Result](inst, List(arg1, arg2), fn(arg1, arg2))
 
   implicit class ComputesFunction3[
     Arg1 : Type, Arg2 : Type, Arg3 : Type,
@@ -225,10 +235,11 @@ object Computes {
     F <: (Arg1,Arg2,Arg3)==>Result : Type](
       fn : (Computes[Arg1], Computes[Arg2], Computes[Arg3]) => Computes[Result]
     )(implicit
+      inst : FnInst[F],
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2],
       arg3 : ComputesVar[Arg3]
-    ) extends ComputesFunction[F,Result](List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
+    ) extends ComputesFunction[F,Result](inst, List(arg1, arg2, arg3), fn(arg1, arg2, arg3))
 
   implicit class ComputesFunction4[
     Arg1 : Type, Arg2 : Type, Arg3 : Type, Arg4 : Type,
@@ -236,11 +247,12 @@ object Computes {
     F <: (Arg1,Arg2,Arg3,Arg4)==>Result : Type](
       fn : (Computes[Arg1], Computes[Arg2], Computes[Arg3], Computes[Arg4]) => Computes[Result]
     )(implicit
+      inst : FnInst[F],
       arg1 : ComputesVar[Arg1],
       arg2 : ComputesVar[Arg2],
       arg3 : ComputesVar[Arg3],
       arg4 : ComputesVar[Arg4]
-    ) extends ComputesFunction[F,Result](List(arg1, arg2, arg3, arg4), fn(arg1, arg2, arg3, arg4))
+    ) extends ComputesFunction[F,Result](inst, List(arg1, arg2, arg3, arg4), fn(arg1, arg2, arg3, arg4))
 
   implicit class ComputesApplication1[
       Arg1 : Type,
@@ -317,12 +329,16 @@ object Computes {
             innerClone = impl(c.computes)
             clone
           }
-          case c : ComputesFunction[T,r] => {
-            val params = c.parameters.map(impl(_))
-            val clone = ComputesFunction[T,r](params.asInstanceOf[List[ComputesVar[_]]], null)(c.tType, c.body.tType)
-            substitutions(computes) = clone
-            clone.body = impl(c.body)
-            clone
+          case c : ComputesFunction[f,r] => {
+            // this whole cast thing works around dotty bug #6758, which gives f incorrect type bounds
+            def thunk[F <: _==>r](c : ComputesFunction[F,r]) = {
+              val params = c.parameters.map(impl(_))
+              val clone = ComputesFunction[F,r](c.inst, params.asInstanceOf[List[ComputesVar[_]]], null)(c.tType, c.body.tType)
+              substitutions(computes) = clone
+              clone.body = impl(c.body)
+              clone
+            }
+            thunk(c.asInstanceOf[ComputesFunction[_==>r,r]]).asInstanceOf[Computes[T]]
           }
           case c : ComputesBinding[v,T] => {
             val clone = ComputesBinding[v,T](impl(c.name).asInstanceOf[ComputesVar[v]], null, null)(c.tType)
@@ -420,19 +436,22 @@ object Computes {
             clone
           }
           case c : ComputesFunction[T,v] => {
-            val names = c.parameters.map({
-              case p : ComputesVar[t] =>
-                ComputesVar[t]()(p.tType)
-            })
-            val clone = ComputesFunction[T,v](names, c.body)(c.tType, c.body.tType)
-            substitutions(c.key) = clone
-            bindings ++= (c.parameters zip names).map({
-              case (par, name) => (par.key, name)
-            })
-            // recalculate any new transitive clones (to clone a function, clone its bound names)
-            findRequiredClones(clone.body, substitutions.keySet.toSet)
-            clone.body = impl(c.body)
-            clone
+            def thunk[F <: _==>v](c : ComputesFunction[F,v]) = {
+              val names = c.parameters.map({
+                case p : ComputesVar[t] =>
+                  ComputesVar[t]()(p.tType)
+              })
+              val clone = ComputesFunction[F,v](c.inst, names, c.body)(c.tType, c.body.tType)
+              substitutions(c.key) = clone
+              bindings ++= (c.parameters zip names).map({
+                case (par, name) => (par.key, name)
+              })
+              // recalculate any new transitive clones (to clone a function, clone its bound names)
+              findRequiredClones(clone.body, substitutions.keySet.toSet)
+              clone.body = impl(c.body)
+              clone
+            }
+            thunk(c.asInstanceOf[ComputesFunction[_==>v,v]]).asInstanceOf[Computes[T]]
           }
           case c => {
             val clone = c.shallowClone
@@ -574,6 +593,31 @@ object Computes {
       val visitedSet = HashSet[ComputesKey]()
 
       def bindVars(names : List[ComputesVar[_]], values : List[Expr[_]], reflection : Reflection, scope : Map[ComputesKey,Expr[_]]=>Expr[Unit]) : Expr[Unit] = {
+        /*import reflection._
+        val vMap = HashMap[ComputesKey,Expr[_]]()
+        val statements = (names zip values).flatMap({
+          case (name : ComputesVar[t], value) => {
+            implicit val e1 = name.tType
+            val bloodSacrifice = '{
+              val bind = ${ value.asInstanceOf[Expr[t]] }
+              bind
+            }
+            bloodSacrifice.unseal match {
+              case IsInlined(inl) => inl.body match {
+                case IsBlock(b1) => b1.expr match {
+                  // idk why there are 2 blocks nested inside each other here, or what that weird type thing does...
+                  case IsBlock(b2) => {
+                    vMap(name.key) = b2.expr.seal.cast[t]
+                    b1.statements ++ b2.statements
+                  }
+                }
+              }
+            }
+          }
+        })
+        Block(
+          statements,
+          scope(vMap.toMap).unseal).seal.cast[Unit]*/
         def doIt(nv : List[(ComputesVar[_],Expr[_])], vMap : Map[ComputesKey,Expr[_]]) : Expr[Unit] = nv match {
           case Nil => scope(vMap)
           case (name : ComputesVar[t], v) :: tl => {
@@ -595,25 +639,31 @@ object Computes {
       }
 
       def bindSequence(seq : List[Computes[_]], closure : List[ComputesVar[_]], singleUse : Boolean, after : BasicBlock) : BasicBlock = {
-        val cMap = HashMap[ComputesKey,List[ComputesVar[_]]]()
+        val resultClosures = ArrayBuffer[List[ComputesVar[_]]]()
         seq.foldLeft(Nil : List[ComputesVar[_]])((acc, s) => {
-          cMap(s.key) = acc
-          s.auxVar :: acc
+          resultClosures += acc
+          orderedSetMerge(acc, List(s.auxVar))
         })
-        val (_, result) = seq.foldRight((NoKey : ComputesKey, after))((s, acc) => {
-          val (next, after) = acc
-          val fullClosure = cMap(s.key) ++ orderedSetMerge(closure, if next != NoKey then nodeClosures(next) else Nil)
-          (s.key, impl(s, fullClosure, (v, pcMap, vMap, popData, pushData, pushPC, reflection) => {
-            if !singleUse then {
-              implicit val e1 = s.tType
-              '{
-                val bind = ${ v }
-                ${ after(pcMap, vMap + ((s.auxVar.key, '{ bind })), popData, pushData, pushPC, reflection) }
-              }
-            } else {
-              after(pcMap, vMap + ((s.auxVar.key, v)), popData, pushData, pushPC, reflection)
+        var inClosure = closure
+        val (_, result) = (seq zip resultClosures).foldRight((NoKey, after))((ss, acc) => (ss, acc) match {
+          case ((s, resultClosure), (next, after)) => {
+            //println(s"rc ${s.key} ${s.auxKey} ${resultClosure.map(_.key)} ${closure.map(_.key)}")
+            if next != NoKey then {
+              inClosure = orderedSetMerge(inClosure, nodeClosures(next))
             }
-          }))
+            val fullClosure = orderedSetMerge(inClosure, resultClosure)
+            (s.key, impl(s, fullClosure, (v, pcMap, vMap, popData, pushData, pushPC, reflection) => {
+              if !singleUse then {
+                implicit val e1 = s.tType
+                '{
+                  val bind = ${ v }
+                  ${ after(pcMap, vMap + ((s.auxVar.key, '{ bind })), popData, pushData, pushPC, reflection) }
+                }
+              } else {
+                after(pcMap, vMap + ((s.auxVar.key, v)), popData, pushData, pushPC, reflection)
+              }
+            }))
+          }
         })
         result
       }
@@ -670,7 +720,7 @@ object Computes {
             }
           case c : ComputesVar[T] => {
             (pcMap, vMap, popData, pushData, pushPC, reflection) => {
-              //print("v "); print(vMap); println(c.key)
+              //println(s"v $vMap ${c.key}")
               if cont == null then
                 pushData(vMap(c.key))
               else
@@ -694,10 +744,13 @@ object Computes {
               blocks += block
             }
 
-            val argBlocks = HashMap[ComputesKey,BasicBlock]()
+            // generate arguments right to left in order to accumulate closures from smallest to largest
+            var nextArg : BasicBlock = null
+            var fullClosure = closure
             c.arguments.foldRight(NoKey)((arg, nextKey) => {
-              val fullClosure = orderedSetMerge(closure, if nextKey != NoKey then nodeClosures(nextKey) else Nil)
-              val b = impl(
+              fullClosure = orderedSetMerge(fullClosure, if nextKey != NoKey then nodeClosures(nextKey) else Nil)
+              val narg = nextArg
+              nextArg = impl(
                 arg,
                 fullClosure,
                 if nextKey != NoKey then {
@@ -706,21 +759,20 @@ object Computes {
                       //print("arg "); print(vMap); println(arg)
                       pushData(argVal)
                     }
-                    ${ argBlocks(nextKey)(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                    ${ narg(pcMap, vMap, popData, pushData, pushPC, reflection) }
                   }
                 } else null)
-              argBlocks(arg.key) = (pcMap, vMap, popData, pushData, pushPC, reflection) => {
-                //print("arg pre "); print(vMap); println(arg)
-                b(pcMap, vMap, popData, pushData, pushPC, reflection)
-              }
               arg.key
             })
 
-            val fullClosure = orderedSetMerge(closure, if !c.arguments.isEmpty then nodeClosures(c.arguments.head.key) else Nil)
+            // include the left-most argument (skipped above as it is not relevant) in fullClosure
+            if !c.arguments.isEmpty then {
+              fullClosure = orderedSetMerge(fullClosure, nodeClosures(c.arguments.head.key))
+            }
             impl(c.function, fullClosure, (fn, pcMap, vMap, popData, pushData, pushPC, reflection) => '{
               // if we have a continuation then push block to return to, else we are a leaf call
               ${
-                //print("app "); print(vMap); println(c)
+                //println(s"app $vMap ${c.key} ${closure.map(_.key)}")
                 if cont != null then {
                   // push locals left to right
                   pushClosure(closure.map(v => vMap(v.key)), pushData, reflection, pushPC(pcMap(c.auxKey).toExpr))
@@ -733,13 +785,13 @@ object Computes {
               ${ pushData('{ fnV.closure }) }
               ${
                 if !c.arguments.isEmpty then
-                  argBlocks(c.arguments.head.key)(pcMap, vMap, popData, pushData, pushPC, reflection)
+                  nextArg(pcMap, vMap, popData, pushData, pushPC, reflection)
                 else
                   '{}
               }
             })
           }
-          case c : ComputesFunction[_,_] => {
+          case c : ComputesFunction[fnType,_] => {
             // lazily generate function body (incl. stack pop and closure extraction)
             if !visitedSet(c.key) then {
               visitedSet += c.key
@@ -766,7 +818,7 @@ object Computes {
               blocks += block
             }
             (pcMap, vMap, popData, pushData, pushPC, reflection) => {
-              import reflection._
+              implicit val e1 = c.tType
               //println(s"CLOS ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
               val refs = nodeClosures(c.key).map(v => vMap(v.key))
               val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then
@@ -782,7 +834,7 @@ object Computes {
               else
                 '{ null }
               '{
-                val fn = ==>(${ pcMap(c.body.key).toExpr }, ${ closureExpr })
+                val fn = ${ c.inst(pcMap(c.body.key).toExpr, closureExpr) }
                 ${
                   //print("ffn "); print(vMap); println(c)
                   if cont != null then
@@ -823,7 +875,9 @@ object Computes {
               val outputs = c.cases.map(c => c._2.key -> impl(c._2, closure, null)).toMap
               val default = c.default.map(impl(_, closure, null))
 
-              val bodyClosure = c.cases.map(a => nodeClosures(a._2.key)).foldLeft(c.argument.auxVar :: closure)(orderedSetMerge)
+              // do not include c.argument.auxVar in bodyClosure, since that will mean that argument is inside its own closure
+              // (which will fail is enough indirections happen)
+              val bodyClosure = c.cases.map(a => nodeClosures(a._2.key)).foldLeft(closure)(orderedSetMerge)
               bindSequence(c.argument :: c.cases.map(_._1), bodyClosure, true,
                 (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
                   ${
@@ -945,7 +999,7 @@ object Computes {
       for(i <- 0 until indentation) {
         print("  ")
       }
-      print(computes.key_); print("; ")
+      print(s"${computes.key_}; ${computes.auxKey_}; ${computes.auxVar.key_}; ")
       if names.contains(computes.key_) then {
         print("<>"); println(names(computes.key_))
       } else {
@@ -996,18 +1050,18 @@ object Computes {
     val noLazy = eliminateLazyRefs(cloned)
     println("NOLAZY")
     //printComputes(noLazy)
-    val inlinedComputes = performInlining(noLazy)
-    println("INLINE1")
+    //val inlinedComputes = performInlining(noLazy)
+    //println("INLINE1")
     //printComputes(inlinedComputes)
-    val flattenedComputes = flatten(inlinedComputes)
+    val flattenedComputes = flatten(noLazy)
     println("FLATTENED")
-    //printComputes(flattenedComputes)
-    val inlinedComputes2 = performInlining(flattenedComputes)
-    println("INLINE2")
+    printComputes(flattenedComputes)
+    //val inlinedComputes2 = performInlining(flattenedComputes)
+    //println("INLINE2")
     //printComputes(inlinedComputes2)
 
-    val rootKey = inlinedComputes2.key
-    val basicBlocks = getBasicBlocks(inlinedComputes2)
+    val rootKey = flattenedComputes.key
+    val basicBlocks = getBasicBlocks(flattenedComputes)
 
     //println(blocks)
     val pcMap = basicBlocks.zipWithIndex.map((block, idx) => (block._1, idx)).toMap
@@ -1029,22 +1083,28 @@ object Computes {
                 CaseDef(
                   Pattern.Value(Literal(Constant.Int(pcMap(key)))),
                   None,
-                  block(
-                    pcMap,
-                    Map.empty,
-                    '{ dataStack.pop },
-                    v => '{ dataStack.push(${ v }) },
-                    pc => '{ pcStack.push(${ pc }) },
-                    reflection).unseal)
+                  '{
+                    def indirect(pcStack : ArrayStack[Int], dataStack : ArrayStack[Any]) =
+                      ${ 
+                        block(
+                          pcMap,
+                          Map.empty,
+                          '{ dataStack.pop },
+                          v => '{ dataStack.push(${ v }) },
+                          pc => '{ pcStack.push(${ pc }) },
+                          reflection)
+                      }
+                    indirect(pcStack, dataStack)
+                  }.unseal)
             })).seal
         }
       }
       println(s"d2 $dataStack")
       dataStack.pop.asInstanceOf[T]
     }
-    println(expr.unseal) // DEBUG
-    //expr
-    '{ ??? }
+    printComputes(flattenedComputes)
+    println(expr.show) // DEBUG
+    expr
   }
 
   // problem: even if the input expression is globally reachable, we can't tell here because of how

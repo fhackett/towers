@@ -25,9 +25,6 @@ object JSON {
             case (from, to, v) => '{ ${ v } >= ${ from } && ${ v } <= ${ to } }
           }))
 
-  def drop[E : Type, T : Type](g : Computes[Grammar[E,T]]) : Computes[Grammar[E,Unit]] =
-    g.map((_ : Computes[T]) => const(()))
-
   val commaSep : Computes[Grammar[Char,Unit]] =
     for(_ : Computes[Unit] <- ws;
         _ : Computes[Char] <- term(',');
@@ -115,18 +112,27 @@ object JSON {
   val string : Computes[Grammar[Char,JSONValue]] =
     stringLiteral.map((str : Computes[String]) => expr(str, str => '{ JSONString(${ str }) : JSONValue }))
 
+  val `true` : Computes[Grammar[Char,JSONValue]] =
+    str("true").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
+
+  val `false` : Computes[Grammar[Char,JSONValue]] =
+    str("false").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
+
   val value : Computes[Grammar[Char,JSONValue]] =
     choose(
       `object`,
       array,
+      `true`,
+      `false`,
       string)/*,
       number)*/
 
   val json : Computes[Grammar[Char,JSONValue]] =
     for(_ : Computes[Unit] <- ws;
         v : Computes[JSONValue] <- value;
-        _ : Computes[Unit] <- ws)
-     yield v 
+        _ : Computes[Unit] <- ws;
+        _ : Computes[Unit] <- eofTerm[Char])
+     yield v //
 
   val stringParser : Computes[String|=>Option[JSONValue]] =
     (str : Computes[String]) => {

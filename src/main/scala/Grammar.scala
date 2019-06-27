@@ -19,6 +19,10 @@ class Cell[T](var t : T)
 
 object Grammar {
 
+  implicit def InputSourceInst[E : Type] : Computes.FnInst[InputSource[E]] = new {
+    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) = '{ InputSource(${ pc }, ${ closure }) }
+  }
+
   def parse[E : Type, T : Type](g : Computes[Grammar[E,T]], input : Computes[InputSource[E]]) : Computes[Option[T]] =
     let(expr((), _ => '{ Cell[Option[T]](null) }), (cell : Computes[Cell[Option[T]]]) =>
         let(
@@ -35,17 +39,32 @@ object Grammar {
             })))
 
   def term[E : Type : Liftable](e : E) : Computes[Grammar[E,E]] = TermGrammar(const(e))
-  def term[E : Type : Liftable, I <: Iterable[E] : Type : Liftable](it : I) : Computes[Grammar[E,I]] = {
-    var lhs : Computes[Grammar[E,E]] = null
-    for(e <- it) {
-      if lhs != null then {
-        lhs = lhs.flatMap((ign : Computes[E]) => term(e))
-      } else {
-        lhs = term(e)
-      }
+  def term[E : Type](e : Computes[E]) : Computes[Grammar[E,E]] = TermGrammar(e)
+
+  def drop[E : Type, T : Type](g : Computes[Grammar[E,T]]) : Computes[Grammar[E,Unit]] =
+    g.map((_ : Computes[T]) => const(()))
+
+  def seq[E : Type : Liftable](first : E, rest : E*) : Computes[Grammar[E,Unit]] = {
+    var lhs : Computes[Grammar[E,Unit]] = drop(term(const(first)))
+    for(e <- rest) {
+      lhs = lhs.flatMap((_ : Computes[Unit]) => drop(term(const(e))))
     }
-    lhs.flatMap((ign : Computes[E]) => succeed[E,I](const(it)))
+    lhs
   }
+  def seq[E : Type](first : Computes[E], rest : Computes[E]*) : Computes[Grammar[E,Unit]] = {
+    var lhs : Computes[Grammar[E,Unit]] = drop(term(first))
+    for(e <- rest) {
+      lhs = lhs.flatMap((_ : Computes[Unit]) => drop(term(e)))
+    }
+    lhs
+  }
+
+  def str(str : String) : Computes[Grammar[Char,Unit]] =
+    if str.length == 0 then {
+      succeed(const(()))
+    } else {
+      seq(str.head, str.tail :_*)
+    }
 
   def anyTerm[E : Type] : Computes[Grammar[E,E]] =
     AnyTermGrammar()
@@ -81,7 +100,7 @@ object Grammar {
           choose(
             sep.flatMap((_ : Computes[Unit]) =>
               ref(g).flatMap((t : Computes[T]) => ref(rec).apply(expr((buf, t), {
-                case (buf, t) => '{ ${ buf } += ${ t }; ${ buf } }
+                case (buf, t) => '{ /*${ buf } += ${ t };*/ ${ buf } }
               })))),
             succeed(expr(buf, buf => '{ ${ buf }.toSeq })))
 
@@ -89,7 +108,7 @@ object Grammar {
         ref(g).flatMap((t : Computes[T]) =>
             ref(rec).apply(expr(t, t => '{
               val buf = ArrayBuffer[T]()
-              buf += ${ t }
+              //buf += ${ t }
               buf
             }))),
         succeed(expr((), _ => '{ Seq.empty })))
@@ -125,7 +144,7 @@ object Grammar {
               List(i -> onEOF(i)),
               default=onE(
                 expr((input, i), {
-                  case (input, i) => '{ ${ input }.charAt(${ i }) }
+                  case (input, i) => '{ val v = ${ input }.charAt(${ i }); println(s"read $v"); v }
                 }), i, rec(i+const(1))))) : Computes[InputSource[Char]]
       rec(const(0))
     }

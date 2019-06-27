@@ -6,3 +6,4 @@ object TestJSON extends App {
 
   println(JSON.parseString("true"))
 }
+
