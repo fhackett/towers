@@ -254,6 +254,20 @@ object Computes {
       arg4 : ComputesVar[Arg4]
     ) extends ComputesFunction[F,Result](inst, List(arg1, arg2, arg3, arg4), fn(arg1, arg2, arg3, arg4))
 
+  implicit class ComputesFunction5[
+    Arg1 : Type, Arg2 : Type, Arg3 : Type, Arg4 : Type, Arg5 : Type,
+    Result : Type,
+    F <: (Arg1,Arg2,Arg3,Arg4,Arg5)==>Result : Type](
+      fn : (Computes[Arg1], Computes[Arg2], Computes[Arg3], Computes[Arg4], Computes[Arg5]) => Computes[Result]
+    )(implicit
+      inst : FnInst[F],
+      arg1 : ComputesVar[Arg1],
+      arg2 : ComputesVar[Arg2],
+      arg3 : ComputesVar[Arg3],
+      arg4 : ComputesVar[Arg4],
+      arg5 : ComputesVar[Arg5]
+    ) extends ComputesFunction[F,Result](inst, List(arg1, arg2, arg3, arg4, arg5), fn(arg1, arg2, arg3, arg4, arg5))
+
   implicit class ComputesApplication1[
       Arg1 : Type,
       Result : Type,
@@ -286,6 +300,15 @@ object Computes {
       (fn : =>Computes[F]) {
     def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2], arg3 : Computes[Arg3], arg4 : Computes[Arg4]) : Computes[Result] =
       ComputesApplication(List(arg1, arg2, arg3, arg4), ref(fn))
+  }
+
+  implicit class ComputesApplication5[
+      Arg1 : Type, Arg2 : Type, Arg3 : Type, Arg4 : Type, Arg5 : Type,
+      Result : Type,
+      F <: (Arg1,Arg2,Arg3,Arg4,Arg5)==>Result : Type]
+      (fn : =>Computes[F]) {
+    def apply(arg1 : Computes[Arg1], arg2 : Computes[Arg2], arg3 : Computes[Arg3], arg4 : Computes[Arg4], arg5 : Computes[Arg5]) : Computes[Result] =
+      ComputesApplication(List(arg1, arg2, arg3, arg4, arg5), ref(fn))
   }
 
   def eliminateLazyRefs[T](computes : Computes[T], vSet : Set[ComputesKey] = Set.empty)(implicit keySrc : KeySrc) : Computes[T] = {

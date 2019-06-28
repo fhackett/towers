@@ -10,10 +10,11 @@ type Error = String
 
 class InputSource[E](pc : Int, closure : Array[Any]) extends ==>[((E,Int,InputSource[E])==>Unit,Int|=>Unit),Unit](pc, closure)
 
-type ShallowFailFn = Error|=>Unit
-type DeepFailFn = Error|=>Unit
-type SuccessFn[E,T] = (T,InputSource[E])==>Unit
-type Grammar[E,T] = (InputSource[E],SuccessFn[E,T],ShallowFailFn,DeepFailFn)==>Unit
+type SFailFn = Error|=>Unit
+type DFailFn = Error|=>Unit
+type SSuccessFn[E,T] = (T,InputSource[E])==>Unit
+type DSuccessFn[E,T] = (T,InputSource[E])==>Unit
+type Grammar[E,T] = (InputSource[E],SSuccessFn[E,T],DSuccessFn[E,T],SFailFn,DFailFn)==>Unit
 
 class Cell[T](var t : T)
 
@@ -28,6 +29,9 @@ object Grammar {
         let(
           g(
             input,
+            (t : Computes[T], _ : Computes[InputSource[E]]) => expr((cell, t), {
+              case (cell, t) => '{ ${ cell }.t = Some(${ t }) }
+            }),
             (t : Computes[T], _ : Computes[InputSource[E]]) => expr((cell, t), {
               case (cell, t) => '{ ${ cell }.t = Some(${ t }) }
             }),
@@ -90,34 +94,36 @@ object Grammar {
     def map[T2 : Type](fn : Computes[T|=>T2]) : Computes[Grammar[E,T2]] =
       g.flatMap((t : Computes[T]) => succeed[E,T2](fn(t)))
     def filter(fn : Computes[T|=>Boolean]) : Computes[Grammar[E,T]] =
-      g.flatMap((t : Computes[T]) => fn(t).switch(List(const(true) -> succeed[E,T](t), const(false) -> fail[E,T](const("filter")))))
+      `try`(g.flatMap((t : Computes[T]) => fn(t).switch(List(const(true) -> succeed[E,T](t), const(false) -> fail[E,T](const("filter"))))))
 
     def rep(sep : Computes[Grammar[E,Unit]] = succeed(const(()))) : Computes[Grammar[E,Seq[T]]] = {
       import scala.collection.mutable.ArrayBuffer
+      // TODO: rewrite in terms of ArrayBuffer, currently that breaks codegen
 
-      lazy val rec : Computes[ArrayBuffer[T]|=>Grammar[E,Seq[T]]] =
-        (buf : Computes[ArrayBuffer[T]]) =>
+      lazy val rec : Computes[Seq[T]|=>Grammar[E,Seq[T]]] =
+        (buf : Computes[Seq[T]]) =>
           choose(
-            sep.flatMap((_ : Computes[Unit]) =>
-              ref(g).flatMap((t : Computes[T]) => ref(rec).apply(expr((buf, t), {
-                case (buf, t) => '{ /*${ buf } += ${ t };*/ ${ buf } }
-              })))),
-            succeed(expr(buf, buf => '{ ${ buf }.toSeq })))
+            for(t : Computes[T] <- `try`(
+                  for(_ : Computes[Unit] <- sep;
+                      t : Computes[T] <- ref(g))
+                    yield t);
+                b2 : Computes[Seq[T]] <- ref(rec).apply(expr((buf, t), {
+                  case (buf, t) => '{ ${ buf } :+ ${ t } }
+                })))
+              yield b2,
+            succeed(buf))
 
       choose(
-        ref(g).flatMap((t : Computes[T]) =>
-            ref(rec).apply(expr(t, t => '{
-              val buf = ArrayBuffer[T]()
-              //buf += ${ t }
-              buf
-            }))),
+        for(t : Computes[T] <- `try`(ref(g));
+            b2 : Computes[Seq[T]] <- ref(rec).apply(expr(t, t => '{ Seq(${ t })/*ArrayBuffer[T]() +=${ t }*/ })))
+          yield b2,
         succeed(expr((), _ => '{ Seq.empty })))
     }
 
     def repDrop(sep : Computes[Grammar[E,Unit]] = succeed(const(()))) : Computes[Grammar[E,Unit]] = {
       lazy val rec : Computes[Grammar[E,Unit]] =
         choose(
-          sep.flatMap((_ : Computes[Unit]) => ref(g).flatMap((_ : Computes[T]) => ref(rec))),
+          `try`(sep.flatMap((_ : Computes[Unit]) => ref(g))).flatMap((_ : Computes[T]) => ref(rec)),
           succeed(const(())))
 
       choose(
@@ -182,14 +188,14 @@ class TermGrammar[E : Type](var term : Computes[E]) extends GrammarComputable[E,
 
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,E]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,E]], dSuccess : Computes[DSuccessFn[E,E]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       input(
         ((e : Computes[E], i : Computes[Int], next : Computes[InputSource[E]]) =>
           e.switch(
-            List(term -> success(e, next)),
-            default=shallowFail(const("error")))) : Computes[(E,Int,InputSource[E])==>Unit],
+            List(term -> dSuccess(e, next)),
+            default=sFail(const("error")))) : Computes[(E,Int,InputSource[E])==>Unit],
         ((i : Computes[Int]) =>
-          shallowFail(const("eof"))) : Computes[Int|=>Unit])
+          sFail(const("eof"))) : Computes[Int|=>Unit])
 }
 
 class EOFTermGrammar[E : Type] extends GrammarComputable[E,Unit] {
@@ -200,12 +206,12 @@ class EOFTermGrammar[E : Type] extends GrammarComputable[E,Unit] {
 
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,Unit]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,Unit]], dSuccess : Computes[DSuccessFn[E,Unit]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       input(
         (e : Computes[E], i : Computes[Int], next : Computes[InputSource[E]]) =>
-          shallowFail(const("not EOF")),
+          sFail(const("not EOF")),
         (i : Computes[Int]) =>
-          success(const(()), const(null)))
+          sSuccess(const(()), const(null)))
 }
 
 class AnyTermGrammar[E : Type] extends GrammarComputable[E,E] {
@@ -216,12 +222,12 @@ class AnyTermGrammar[E : Type] extends GrammarComputable[E,E] {
 
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,E]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,E]], dSuccess : Computes[DSuccessFn[E,E]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       input(
         (e : Computes[E], i : Computes[Int], next : Computes[InputSource[E]]) =>
-          success(e, next),
+          dSuccess(e, next),
         ((i : Computes[Int]) =>
-          shallowFail(const("eof"))) : Computes[Int|=>Unit])
+          sFail(const("eof"))) : Computes[Int|=>Unit])
 }
 
 class SuccessGrammar[E : Type, T : Type](var t : Computes[T]) extends GrammarComputable[E,T] {
@@ -238,8 +244,8 @@ class SuccessGrammar[E : Type, T : Type](var t : Computes[T]) extends GrammarCom
   
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,T]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
-      success(t, input)
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
+      sSuccess(t, input)
 }
 
 class FailGrammar[E : Type, T : Type](var err : Computes[Error]) extends GrammarComputable[E,T] {
@@ -256,8 +262,8 @@ class FailGrammar[E : Type, T : Type](var err : Computes[Error]) extends Grammar
   
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,T]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
-      shallowFail(err)
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
+      sFail(err)
 }
 
 class FlatMapGrammar[E : Type, T1 : Type, T2 : Type](var g : Computes[Grammar[E,T1]], var fn : Computes[T1|=>Grammar[E,T2]]) extends GrammarComputable[E,T2] {
@@ -276,13 +282,15 @@ class FlatMapGrammar[E : Type, T1 : Type, T2 : Type](var g : Computes[Grammar[E,
 
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,T2]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T2]], dSuccess : Computes[DSuccessFn[E,T2]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       g(
         input,
         (t1 : Computes[T1], next : Computes[InputSource[E]]) =>
-          fn(t1).apply(next, success, deepFail, deepFail),
-        shallowFail,
-        deepFail)
+          fn(t1).apply(next, sSuccess, dSuccess, sFail, dFail),
+        (t1 : Computes[T1], next : Computes[InputSource[E]]) =>
+          fn(t1).apply(next, dSuccess, dSuccess, dFail, dFail),
+        sFail,
+        dFail)
 }
 
 class DisjunctGrammar[E : Type, T : Type](var left : Computes[Grammar[E,T]], var right : Computes[Grammar[E,T]]) extends GrammarComputable[E,T] {
@@ -301,13 +309,14 @@ class DisjunctGrammar[E : Type, T : Type](var left : Computes[Grammar[E,T]], var
   
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,T]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       left(
         input,
-        success,
+        sSuccess,
+        dSuccess,
         (error : Computes[Error]) =>
-          right(input, success, shallowFail, deepFail),
-        deepFail)
+          right(input, sSuccess, dSuccess, sFail, dFail),
+        dFail)
 }
 
 class TryGrammar[E : Type, T : Type](var g : Computes[Grammar[E,T]]) extends GrammarComputable[E,T] {
@@ -324,7 +333,20 @@ class TryGrammar[E : Type, T : Type](var g : Computes[Grammar[E,T]]) extends Gra
   
   def tryFold = None
   def flatten =
-    (input : Computes[InputSource[E]], success : Computes[SuccessFn[E,T]], shallowFail : Computes[ShallowFailFn], deepFail : Computes[DeepFailFn]) =>
-      g(input, success, shallowFail, shallowFail)
+    (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
+      g(input, sSuccess, dSuccess, sFail, sFail)
+}
+
+object Test {
+  
+  def mkStringParser[T : Type](g : Computes[Grammar[Char,T]]) : Computes[String|=>Option[T]] =
+    (str : Computes[String]) =>
+      Grammar.parse(g, Grammar.makeStringInput(str))
+
+  val aSeq : Computes[Grammar[Char,Seq[Char]]] =
+    term('a').rep()
+
+  inline def matchEOF(str : String) : Option[Unit] = ${ Computes.reifyCall(mkStringParser(eofTerm), '{ str }) }
+  inline def matchAs(str : String) : Option[Seq[Char]] = ${ Computes.reifyCall(mkStringParser(aSeq), '{ str }) }
 }
 
