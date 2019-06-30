@@ -3,6 +3,7 @@ package towers.computes
 import Predef.{any2stringadd => _, _} // allow implicits to override +
 
 import scala.collection.mutable.{HashMap, HashSet, ArrayStack, ArrayBuffer}
+import scala.collection.{Set,Map}
 
 import quoted._
 import tasty._
@@ -17,6 +18,7 @@ trait KeySrc {
 sealed abstract class Computes[T : Type] {
   val tType = implicitly[Type[T]]
 
+  private[computes] var safe = false
   private[computes] var key_ = NoKey
   private[computes] var auxKey_ = NoKey
   def key(implicit keySrc : KeySrc) = {
@@ -128,11 +130,18 @@ class ComputesApplication[FnType, Result : Type](var arguments : List[Computes[_
   override def computesArity = arguments.length + 1
 
   override def implTryFold(implicit keySrc : KeySrc) = function match {
-    case fn : ComputesFunction[_,Result] =>
+    case fn : ComputesFunction[_,Result] => {
+      //println(s"try inline $this, ${this.key_}")
+      val subs = (fn.parameters zip arguments).toMap
       Some(
-        Computes.minSubstituteClone(
-          (fn.parameters.map(_.key) zip arguments).toMap,
+        ComputesRewrite(
+          ComputesRewrite.findTouches(fn.body, subs.keySet.asInstanceOf[Set[Computes[_]]]),
+          subs.asInstanceOf[Map[Computes[_],Computes[_]]],
           fn.body))
+    }
+        /*Computes.minSubstituteClone(
+          (fn.parameters.map(_.key) zip arguments).toMap,
+          fn.body))*/
     case _ => None
   }
   override def tryFold = ???
@@ -162,6 +171,122 @@ class ComputesFunction[FnType <: Computes.==>[_,Result] : Type, Result : Type](v
   }
   override def computesArity = 1
   override def tryFold = None
+}
+
+class ComputesRewrite[T : Type](val touches : Set[Computes[_]], val substitutions : Map[Computes[_],Computes[_]], var computes : Computes[T]) extends Computes[T] {
+  val auxVar = ComputesVar[T]()
+  def shallowClone = ComputesRewrite(touches, substitutions, computes)
+  def setComputesElement(n : Int, v : Computes[_]) = n match {
+    case 0 => computes = v.asInstanceOf[Computes[T]]
+    case _ => throw IndexOutOfBoundsException(n.toString)
+  }
+  def getComputesElement(n : Int) = n match {
+    case 0 => computes
+    case _ => throw IndexOutOfBoundsException(n.toString)
+  }
+  def computesArity = 1
+
+  def tryFold =
+    if touches(computes) then {
+      //println(s"inline touches ${computes.key_}")
+      if substitutions.contains(computes) then {
+        //println(s"subst ${computes.key_} $computes ${substitutions(computes)} ${substitutions(computes).key_}")
+        Some(substitutions(computes).asInstanceOf[Computes[T]])
+      } else {
+        computes match {
+          case c : ComputesVar[T] =>
+            ???
+          case c : ComputesByKey[T] => {
+            Predef.assert(c.binding != null)
+            val clone = Computes.makeSafe(ComputesByKey[T](null))
+            val newTouches = touches ++ ComputesRewrite.findTouches(c.binding, Set(c))
+            val newSubs = substitutions ++ Map(c -> clone)
+            clone.binding = ComputesRewrite(newTouches, newSubs, c.binding)
+            Some(clone)
+          }
+          case c : ComputesBinding[v,T] => {
+            implicit val e1 = c.name.tType
+            val newName = Computes.makeSafe(ComputesVar[v]()(c.name.tType))
+            val newTouches = touches ++ ComputesRewrite.findTouches(c.body, Set(c.name))
+            val newSubs = substitutions ++ Map(c.name -> newName)
+            Some(
+              Computes.makeSafe(
+                ComputesBinding(
+                  newName,
+                  ComputesRewrite(newTouches, newSubs, c.value),
+                  ComputesRewrite(newTouches, newSubs, c.body))))
+          }
+          case c : ComputesFunction[T,r] => {
+            implicit val e1 = c.body.tType
+            val newArgs = c.parameters.map({
+              case p : ComputesVar[v] =>
+                Computes.makeSafe(ComputesVar[v]()(p.tType))
+            })
+            val extraSubs = (c.parameters zip newArgs).toMap
+            val newTouches = touches ++ ComputesRewrite.findTouches(c.body, extraSubs.keySet.asInstanceOf[Set[Computes[_]]])
+            val newSubs = substitutions ++ extraSubs
+            type F <: Computes.==>[_,r]
+            implicit val e2 = c.tType.asInstanceOf[Type[F]]
+            Some(Computes.makeSafe(ComputesFunction[F,r](
+              c.inst.asInstanceOf[Computes.FnInst[F]],
+              newArgs,
+              ComputesRewrite(newTouches, newSubs, c.body)).asInstanceOf[Computes[T]]))
+          }
+          case c => {
+            val clone = c.shallowClone
+            for(i <- 0 until clone.computesArity) {
+              //println(s"cloning ${c.getComputesElement(i)}, ${c.getComputesElement(i).key_}")
+              clone.setComputesElement(i, ComputesRewrite(touches, substitutions, c.getComputesElement(i)))
+            }
+            Some(clone)
+          }
+        }
+      }
+    } else {
+      //println(s"no touch ${computes.key_}")
+      Some(computes)
+    }
+}
+
+object ComputesRewrite {
+  def findTouches(computes : Computes[_], subs : Set[Computes[_]]) : Set[Computes[_]] = {
+    val newTouches = HashSet[Computes[_]]()
+
+    def iter[T](computes : Computes[T]) : Boolean = {
+      val visitedSet = HashSet[Computes[_]]()
+      var hasChanged = false
+
+      def impl[T](computes : Computes[T]) : Boolean = {
+        if !visitedSet(computes) then {
+          visitedSet += computes
+          val directly = subs.contains(computes)
+          val indirectly = computes match {
+            case c : ComputesByKey[T] =>
+              if c.binding != null then {
+                impl(c.binding) || directly
+              } else {
+                directly
+              }
+            case c =>
+              c.computesIterator.foldLeft(directly)((acc, cc) => impl(cc) || acc)
+          }
+          if indirectly != newTouches(computes) then {
+            hasChanged = true
+            newTouches += computes
+          }
+          //println(s"CHANGED ${computes.key_} $indirectly")
+          indirectly
+        } else {
+          newTouches(computes)
+        }
+      }
+      impl(computes)
+      hasChanged
+    }
+    // iterate analysis until fixpoint is reached
+    while(iter(computes)) {}
+    newTouches
+  }
 }
 
 class ComputesSwitch[Arg, Result : Type](
@@ -207,6 +332,11 @@ object Computes {
   implicit def freshVar[T : Type] : ComputesVar[T] = ComputesVar[T]()
 
   def ref[T : Type](computes : =>Computes[T]) : Computes[T] = ComputesLazyRef(computes)
+
+  def makeSafe[T](computes : Computes[T]) : computes.type = {
+    computes.safe = true
+    computes
+  }
 
   implicit class ComputesFunction1[
     Arg1 : Type,
@@ -330,12 +460,40 @@ object Computes {
     impl(computes)
   }
 
+  def assertNoKeys[T](computes : Computes[T]) : Unit = {
+    val visitedSet = HashSet[Computes[_]]()
+    def impl[T](computes : Computes[T]) : Unit = {
+      Predef.assert(computes.key_ == NoKey)
+      if(!visitedSet(computes)) {
+        visitedSet += computes
+        computes match {
+          case c : ComputesLazyRef[T] => impl(c.computes)
+          case c : ComputesFunction[_,_] => {
+            c.parameters.foreach(impl(_))
+            impl(c.body)
+          }
+          case c : ComputesBinding[_,T] => {
+            impl(c.name)
+            impl(c.value)
+            impl(c.body)
+          }
+          case c => {
+            c.computesIterator.foreach(impl(_))
+          }
+        }
+      }
+    }
+    impl(computes)
+  }
+
   def clone[T](computes : Computes[T]) : Computes[T] = {
     val substitutions = HashMap[Computes[_],Computes[_]]()
 
     def impl[T](computes : Computes[T]) : Computes[T] = {
       if computes.key_ != NoKey then {
         computes // this should only be reachable if we're cloning the result of a tryFold
+      } else if computes.safe then {
+        computes
       } else if substitutions.contains(computes) then {
         substitutions(computes).asInstanceOf[Computes[T]]
       } else {
@@ -344,6 +502,15 @@ object Computes {
             val clone = ComputesVar[T]()(c.tType)
             substitutions(computes) = clone
             clone
+          }
+          case c : ComputesByKey[T] => {
+            /*val clone = ComputesByKey[T](null)(c.tType)
+            substitutions(computes) = clone
+            if c.binding != null then {
+              clone.binding = impl(c.binding)
+            }
+            clone*/
+            c // don't clone ComputesByKey, it cannot appear in anything we should be cloning
           }
           case c : ComputesLazyRef[T] => {
             var innerClone : Computes[T] = null
@@ -454,7 +621,7 @@ object Computes {
             bindings(c.name.key) = clone.name
             clone.value = impl(c.value)
             // recalculate any new transitive clones (to clone a binding, clone its bound name)
-            findRequiredClones(clone.body, substitutions.keySet.toSet)
+            findRequiredClones(clone.body, substitutions.keySet)
             clone.body = impl(c.body)
             clone
           }
@@ -470,7 +637,7 @@ object Computes {
                 case (par, name) => (par.key, name)
               })
               // recalculate any new transitive clones (to clone a function, clone its bound names)
-              findRequiredClones(clone.body, substitutions.keySet.toSet)
+              findRequiredClones(clone.body, substitutions.keySet)
               clone.body = impl(c.body)
               clone
             }
@@ -513,10 +680,17 @@ object Computes {
       } else {
         computes match {
           case c : ComputesByKey[T] => {
+            //println("K BEFORE")
+            //printComputes(c)
             if c.binding != null then { // if binding is null we are in a recursive call that will eventually set binding
               substitutions(computes.key) = c
-              c.binding = impl(c.binding)
+              // make sure rewrites can't escape a recursive loop that they start inside of
+              val oldBinding = c.binding
+              c.binding = null
+              c.binding = impl(oldBinding)
             }
+            //println("K AFTER")
+            //printComputes(c)
             c
           }
           case _ => {
@@ -526,7 +700,11 @@ object Computes {
             for(i <- 0 until computes.computesArity) {
               computes.setComputesElement(i, impl(computes.getComputesElement(i)))
             }
-            val result = action(computes, impl(_), substitutions.keySet.toSet)
+            //println("BEFORE")
+            //printComputes(computes)
+            val result = action(computes, impl(_), substitutions.keySet)
+            //println("AFTER")
+            //printComputes(result)
             //println(s"actionResult ${computes.key} ${result.key} ${result}")
             if isRecursive(indirect.key) then {
               indirect.binding = result
@@ -549,7 +727,10 @@ object Computes {
     rewrite(computes, new {
       def apply[T](computes : Computes[T], rec : Computes[T]=>Computes[T], reachedSet : Set[ComputesKey]) : Computes[T] =
         computes.implTryFold match {
-          case Some(folded) => rec(eliminateLazyRefs(Computes.clone(folded), reachedSet))
+          case Some(folded) => {
+            rec(eliminateLazyRefs(Computes.clone(folded), reachedSet))
+            //???
+          }
           case None => computes
         }
     })
@@ -842,7 +1023,7 @@ object Computes {
             }
             (pcMap, vMap, popData, pushData, pushPC, reflection) => {
               implicit val e1 = c.tType
-              //println(s"CLOS ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
+              println(s"CLOS ${c.key} ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
               val refs = nodeClosures(c.key).map(v => vMap(v.key))
               val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then
                 '{
@@ -1022,29 +1203,36 @@ object Computes {
       for(i <- 0 until indentation) {
         print("  ")
       }
-      print(s"${computes.key_}; ${computes.auxKey_}; ${computes.auxVar.key_}; ")
-      if names.contains(computes.key_) then {
-        print("<>"); println(names(computes.key_))
+      if computes != null then {
+        print(s"${computes.key_}; ${computes.auxKey_}; ${computes.auxVar.key_}; ")
+        if names.contains(computes.key_) then {
+          print("<>"); println(names(computes.key_))
+        } else {
+          names(computes.key_) = freshName
+          print(names(computes.key_)); print(": ")
+          computes match {
+            case c : ComputesFunction[_,_] => {
+              println(c.parameters.map(_.key_))
+            }
+            case c : ComputesLazyRef[T] => {
+              print(c); print(" :: "); println(c.computes)
+            }
+            case c : ComputesByKey[T] => {
+              print(c); println(" >>")
+              indentation += 1
+              impl(c.binding)
+              indentation -= 1
+            }
+            case c => println(c)
+          }
+          indentation += 1
+          for(c <- computes.computesIterator) {
+            impl(c)
+          }
+          indentation -= 1
+        }
       } else {
-        names(computes.key_) = freshName
-        print(names(computes.key_)); print(": ")
-        computes match {
-          case c : ComputesLazyRef[T] => {
-            print(c); print(" :: "); println(c.computes)
-          }
-          case c : ComputesByKey[T] => {
-            print(c); println(" >>")
-            indentation += 1
-            impl(c.binding)
-            indentation -= 1
-          }
-          case c => println(c)
-        }
-        indentation += 1
-        for(c <- computes.computesIterator) {
-          impl(c)
-        }
-        indentation -= 1
+        println("NULL")
       }
     }
 
@@ -1067,24 +1255,25 @@ object Computes {
     }
     println("RAW")
     //printComputes(computes)
+    assertNoKeys(computes)
     val cloned = clone(computes)
     println("CLONED")
     //printComputes(cloned)
     val noLazy = eliminateLazyRefs(cloned)
     println("NOLAZY")
-    //printComputes(noLazy)
-    //val inlinedComputes = performInlining(noLazy)
-    //println("INLINE1")
-    //printComputes(inlinedComputes)
-    val flattenedComputes = flatten(noLazy)
+    printComputes(noLazy)
+    val inlinedComputes = performInlining(noLazy)
+    println("INLINE1")
+    printComputes(inlinedComputes)
+    val flattenedComputes = flatten(inlinedComputes)
     println("FLATTENED")
     printComputes(flattenedComputes)
-    //val inlinedComputes2 = performInlining(flattenedComputes)
-    //println("INLINE2")
-    //printComputes(inlinedComputes2)
+    val inlinedComputes2 = performInlining(flattenedComputes)
+    println("INLINE2")
+    printComputes(inlinedComputes2)
 
-    val rootKey = flattenedComputes.key
-    val basicBlocks = getBasicBlocks(flattenedComputes)
+    val rootKey = inlinedComputes2.key
+    val basicBlocks = getBasicBlocks(inlinedComputes2)
 
     //println(blocks)
     val pcMap = basicBlocks.zipWithIndex.map((block, idx) => (block._1, idx)).toMap
@@ -1125,7 +1314,7 @@ object Computes {
       println(s"d2 $dataStack")
       dataStack.pop.asInstanceOf[T]
     }
-    printComputes(flattenedComputes)
+    printComputes(inlinedComputes2)
     println(expr.show) // DEBUG
     expr
   }
