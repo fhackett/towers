@@ -2,7 +2,7 @@ package towers.grammar
 
 import quoted._
 
-import towers.computes.{Computes,Computable}
+import towers.computes.{Computes,Computable,OpContext,KeyContext}
 import Computes._
 
 
@@ -174,19 +174,14 @@ abstract class GrammarComputable[E : Type, T : Type] extends Computable[Grammar[
 
 }
 
-class TermGrammar[E : Type](var term : Computes[E]) extends GrammarComputable[E,E] {
-  def computesArity = 1
-  def getComputesElement(n : Int) = n match {
-    case 0 => term
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  def setComputesElement(n : Int, v : Computes[_]) = n match {
-    case 0 => term = v.asInstanceOf[Computes[E]]
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  override def shallowClone = TermGrammar(term)
+class TermGrammar[E : Type](val term : Computes[E]) extends GrammarComputable[E,E] {
 
-  def tryFold = None
+  def toComputesSeq = Seq(term)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq(term : Computes[E]) => TermGrammar(term)
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,E]], dSuccess : Computes[DSuccessFn[E,E]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       input(
@@ -199,12 +194,13 @@ class TermGrammar[E : Type](var term : Computes[E]) extends GrammarComputable[E,
 }
 
 class EOFTermGrammar[E : Type] extends GrammarComputable[E,Unit] {
-  def computesArity = 0
-  def getComputesElement(n : Int) = throw IndexOutOfBoundsException(n.toString)
-  def setComputesElement(n : Int, v : Computes[_]) = throw IndexOutOfBoundsException(n.toString)
-  override def shallowClone = EOFTermGrammar()
 
-  def tryFold = None
+  def toComputesSeq = Seq.empty
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq() => EOFTermGrammar()
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,Unit]], dSuccess : Computes[DSuccessFn[E,Unit]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       input(
@@ -215,12 +211,13 @@ class EOFTermGrammar[E : Type] extends GrammarComputable[E,Unit] {
 }
 
 class AnyTermGrammar[E : Type] extends GrammarComputable[E,E] {
-  def computesArity = 0
-  def getComputesElement(n : Int) = throw IndexOutOfBoundsException(n.toString)
-  def setComputesElement(n : Int, v : Computes[_]) = throw IndexOutOfBoundsException(n.toString)
-  override def shallowClone = AnyTermGrammar()
 
-  def tryFold = None
+  def toComputesSeq = Seq.empty
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq() => AnyTermGrammar()
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,E]], dSuccess : Computes[DSuccessFn[E,E]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       input(
@@ -231,56 +228,39 @@ class AnyTermGrammar[E : Type] extends GrammarComputable[E,E] {
 }
 
 class SuccessGrammar[E : Type, T : Type](var t : Computes[T]) extends GrammarComputable[E,T] {
-  def computesArity = 1
-  def getComputesElement(n : Int) = n match {
-    case 0 => t
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  def setComputesElement(n : Int, v : Computes[_]) = n match {
-    case 0 => t = v.asInstanceOf[Computes[T]]
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  override def shallowClone = SuccessGrammar(t)
   
-  def tryFold = None
+  def toComputesSeq = Seq(t)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq(t : Computes[T]) => SuccessGrammar(t)
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       sSuccess(t, input)
 }
 
 class FailGrammar[E : Type, T : Type](var err : Computes[Error]) extends GrammarComputable[E,T] {
-  def computesArity = 1
-  def getComputesElement(n : Int) = n match {
-    case 0 => err
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  def setComputesElement(n : Int, v : Computes[_]) = n match {
-    case 0 => err = v.asInstanceOf[Computes[Error]]
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  override def shallowClone = FailGrammar(err)
   
-  def tryFold = None
+  def toComputesSeq = Seq(err)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq(err : Computes[Error]) => FailGrammar(err)
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       sFail(err)
 }
 
 class FlatMapGrammar[E : Type, T1 : Type, T2 : Type](var g : Computes[Grammar[E,T1]], var fn : Computes[T1|=>Grammar[E,T2]]) extends GrammarComputable[E,T2] {
-  def computesArity = 2
-  def getComputesElement(n : Int) = n match {
-    case 0 => g
-    case 1 => fn
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  def setComputesElement(n : Int, v : Computes[_]) = n match {
-    case 0 => g = v.asInstanceOf[Computes[Grammar[E,T1]]]
-    case 1 => fn = v.asInstanceOf[Computes[T1|=>Grammar[E,T2]]]
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  override def shallowClone = FlatMapGrammar(g, fn)
 
-  def tryFold = None
+  def toComputesSeq = Seq(g, fn)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq(g : Computes[Grammar[E,T1]], fn : Computes[T1|=>Grammar[E,T2]]) => FlatMapGrammar(g, fn)
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T2]], dSuccess : Computes[DSuccessFn[E,T2]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       g(
@@ -294,20 +274,13 @@ class FlatMapGrammar[E : Type, T1 : Type, T2 : Type](var g : Computes[Grammar[E,
 }
 
 class DisjunctGrammar[E : Type, T : Type](var left : Computes[Grammar[E,T]], var right : Computes[Grammar[E,T]]) extends GrammarComputable[E,T] {
-  def computesArity = 2
-  def getComputesElement(n : Int) = n match {
-    case 0 => left
-    case 1 => right
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  def setComputesElement(n : Int, v : Computes[_]) = n match {
-    case 0 => left = v.asInstanceOf[Computes[Grammar[E,T]]]
-    case 1 => right = v.asInstanceOf[Computes[Grammar[E,T]]]
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  override def shallowClone = DisjunctGrammar(left, right)
   
-  def tryFold = None
+  def toComputesSeq = Seq(left, right)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq(left : Computes[Grammar[E,T]], right : Computes[Grammar[E,T]]) => DisjunctGrammar(left, right)
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       left(
@@ -320,18 +293,13 @@ class DisjunctGrammar[E : Type, T : Type](var left : Computes[Grammar[E,T]], var
 }
 
 class TryGrammar[E : Type, T : Type](var g : Computes[Grammar[E,T]]) extends GrammarComputable[E,T] {
-  def computesArity = 1
-  def getComputesElement(n : Int) = n match {
-    case 0 => g
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  def setComputesElement(n : Int, v : Computes[_]) = n match {
-    case 0 => g = v.asInstanceOf[Computes[Grammar[E,T]]]
-    case _ => throw IndexOutOfBoundsException(n.toString)
-  }
-  override def shallowClone = TryGrammar(g)
   
-  def tryFold = None
+  def toComputesSeq = Seq(g)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+    case Seq(g : Computes[Grammar[E,T]]) => TryGrammar(g)
+  }
+
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
   def flatten =
     (input : Computes[InputSource[E]], sSuccess : Computes[SSuccessFn[E,T]], dSuccess : Computes[DSuccessFn[E,T]], sFail : Computes[SFailFn], dFail : Computes[DFailFn]) =>
       g(input, sSuccess, dSuccess, sFail, sFail)
