@@ -90,7 +90,7 @@ final class ComputesApplication[FnType, Result : Type](val arguments : Seq[Compu
   }
   def toComputesSeq = function +: arguments
 
-  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
+  def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
 }
 
 class ComputesLazyRef[T : Type](ref : =>Computes[T]) extends Computes[T] {
@@ -379,7 +379,7 @@ object Computes {
           case c : ComputesVar[T] => {
             if scope.contains(c.key) then {
               resolvedVars += computes.key
-              impl(scope(c.key), scope - c.key)
+              impl(scope(c.key).asInstanceOf[Computes[T]], scope - c.key)
             } else {
               Result(c, Set.empty) // must be a new var post-substitution
             }
@@ -410,8 +410,18 @@ object Computes {
             })
             substitutions ++= (c.parameters.map(_.key) zip newParams)
             impl(c.body, scope) match {
-              case Result(body, taints) =>
-                Result(ComputesFunction[fn,r](c.inst, newParams, body), taints)
+              case Result(body, taints) => {
+                type f <: _ ==> r
+                Result(
+                  ComputesFunction[f,r](
+                    c.inst.asInstanceOf[FnInst[f]],
+                    newParams,
+                    body)
+                  (
+                    c.tType.asInstanceOf[Type[f]],
+                    c.body.tType).asInstanceOf[Computes[T]],
+                  taints)
+              }
             }
           }
           case c : ComputesBinding[v,T] => {
@@ -419,11 +429,11 @@ object Computes {
             val Result(value, taints1) = impl(c.value, scope)
             substitutions(c.name.key) = newBind
             val Result(body, taints2) = impl(c.body, scope)
-            Result(ComputesBinding(newBind, value, body), taints1 ++ taints2)
+            Result(ComputesBinding(newBind, value, body)(c.tType), taints1 ++ taints2)
           }
           case c : ComputesIndirect[T] => {
             if c.binding != null then { // if binding is null we are in a recursive call that will eventually set binding
-              val newInd = ComputesIndirect[T](null)
+              val newInd = ComputesIndirect[T](null)(c.tType)
               substitutions(computes.key) = newInd
               // if processing inside a cycle, set the binding to null to ensure there is no way to follow the cycle from inside the cycle
               val oldBinding = c.binding
@@ -453,6 +463,7 @@ object Computes {
     }
 
     val Result(result, taints) = impl(computes, Map.empty)
+    println(taints)
     Predef.assert(taints.isEmpty)
     result
   }
