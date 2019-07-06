@@ -312,7 +312,7 @@ object Computes {
 
   def rewrite[T](computes : Computes[T], action : RewriteAction)(implicit keyCtx : KeyContext) : Computes[T] = {
 
-    case class Result[T](val computes : Computes[T], val scopeTaint : Set[ComputesKey])
+    final case class Result[T](val computes : Computes[T], val scopeTaint : Set[ComputesKey])
 
     val substitutions = HashMap[ComputesKey,Computes[_]]()
     val taintSets = HashMap[ComputesKey,Set[ComputesKey]]()
