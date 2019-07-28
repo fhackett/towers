@@ -46,9 +46,9 @@ object JSON {
 
   val hexDigit : Computes[Grammar[Char,Char]] =
     choose(
-      range(const('0'),const('9')).map((d : Computes[Char]) => expr(d, d => '{ (${ d } - '0').toChar })),
-      range(const('a'),const('f')).map((d : Computes[Char]) => expr(d, d => '{ (${ d } - 'a' + 10).toChar })),
-      range(const('A'),const('F')).map((d : Computes[Char]) => expr(d, d => '{ (${ d } - 'A' + 10).toChar })))
+      range(const('0'),const('9')).map((d : Computes[Char]) => expr1(d, d => '{ (${ d } - '0').toChar })),
+      range(const('a'),const('f')).map((d : Computes[Char]) => expr1(d, d => '{ (${ d } - 'a' + 10).toChar })),
+      range(const('A'),const('F')).map((d : Computes[Char]) => expr1(d, d => '{ (${ d } - 'A' + 10).toChar })))
 
   val stringLiteral : Computes[Grammar[Char,String]] =
     for(_ : Computes[Char] <- term('"');
@@ -84,7 +84,7 @@ object JSON {
               range(const('\u0020'), const('\u10ff'))) // TODO: \u10ffff
           ).rep();
         _ : Computes[Char] <- term('"'))
-      yield expr(chars, chars => '{ ${ chars }.mkString })
+      yield expr1(chars, chars => '{ ${ chars }.mkString })
 
   val array : Computes[Grammar[Char,JSONValue]] =
     for(_ : Computes[Char] <- term('[');
@@ -92,7 +92,7 @@ object JSON {
         vs : Computes[Seq[JSONValue]] <- value.rep(sep=commaSep);
         _ : Computes[Unit] <- ws;
         _ : Computes[Char] <- term(']'))
-      yield expr(vs, vs => '{ JSONArray(${ vs }) : JSONValue })
+      yield expr1(vs, vs => '{ JSONArray(${ vs }) : JSONValue })
 
   val `object` : Computes[Grammar[Char,JSONValue]] =
     for(_ : Computes[Char] <- term('{');
@@ -107,16 +107,16 @@ object JSON {
           ).rep(sep=commaSep);
         _ : Computes[Unit] <- ws;
         _ : Computes[Char] <- term('}'))
-      yield expr(pairs, pairs => '{ JSONObject(${ pairs }.toMap) : JSONValue })
+      yield expr1(pairs, pairs => '{ JSONObject(${ pairs }.toMap) : JSONValue })
 
   val string : Computes[Grammar[Char,JSONValue]] =
-    stringLiteral.map((str : Computes[String]) => expr[JSONValue,String](str, str => '{ JSONString(${ str }) : JSONValue }))
+    stringLiteral.map((str : Computes[String]) => expr1(str, str => '{ JSONString(${ str }) : JSONValue }))
 
   val `true` : Computes[Grammar[Char,JSONValue]] =
-    str("true").map((_ : Computes[Unit]) => expr[JSONValue,Unit,Unit]((), _ => '{ JSONTrue : JSONValue }))
+    str("true").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
 
   val `false` : Computes[Grammar[Char,JSONValue]] =
-    str("false").map((_ : Computes[Unit]) => expr[JSONValue,Unit,Unit]((), _ => '{ JSONTrue : JSONValue }))
+    str("false").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
 
   val value : Computes[Grammar[Char,JSONValue]] =
     choose(

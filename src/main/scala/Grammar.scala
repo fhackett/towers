@@ -35,8 +35,8 @@ object Grammar {
             (t : Computes[T], _ : Computes[InputSource[E]]) => expr((cell, t), {
               case (cell, t) => '{ ${ cell }.t = Some(${ t }) }
             }),
-            (_ : Computes[Error]) => expr(cell, cell => '{ ${ cell }.t = None }),
-            (_ : Computes[Error]) => expr(cell, cell => '{ ${ cell }.t = None })),
+            (_ : Computes[Error]) => expr1(cell, cell => '{ ${ cell }.t = None }),
+            (_ : Computes[Error]) => expr1(cell, cell => '{ ${ cell }.t = None })),
           (unit : Computes[Unit]) =>
             expr((cell, unit), {
               case (cell, _) => '{ ${ cell }.t }
@@ -115,7 +115,7 @@ object Grammar {
 
       choose(
         for(t : Computes[T] <- `try`(ref(g));
-            b2 : Computes[Seq[T]] <- ref(rec).apply(expr(t, t => '{ Seq(${ t })/*ArrayBuffer[T]() +=${ t }*/ })))
+            b2 : Computes[Seq[T]] <- ref(rec).apply(expr1(t, t => '{ Seq(${ t })/*ArrayBuffer[T]() +=${ t }*/ })))
           yield b2,
         succeed(expr((), _ => '{ Seq.empty })))
     }
@@ -134,7 +134,7 @@ object Grammar {
 
   implicit class IndexedSeqOps[E : Type, S <: IndexedSeq[E] : Type](seq : Computes[S]) {
     def length : Computes[Int] =
-      expr(seq, seq => '{ ${ seq }.length })
+      expr1(seq, seq => '{ ${ seq }.length })
     def apply(i : Computes[Int]) : Computes[E] =
       expr((seq, i), {
         case (seq, i) => '{ ${ seq }.apply(${ i }) }
@@ -146,7 +146,7 @@ object Grammar {
       lazy val rec : Computes[Int|=>InputSource[Char]] =
         (i : Computes[Int]) =>
           ((onE : Computes[(Char,Int,InputSource[Char])==>Unit], onEOF : Computes[Int|=>Unit]) =>
-            expr(input, input => '{ ${ input }.length }).switch(
+            expr1(input, input => '{ ${ input }.length }).switch(
               List(i -> onEOF(i)),
               default=onE(
                 expr((input, i), {
@@ -177,7 +177,7 @@ abstract class GrammarComputable[E : Type, T : Type] extends Computable[Grammar[
 class TermGrammar[E : Type](val term : Computes[E]) extends GrammarComputable[E,E] {
 
   def toComputesSeq = Seq(term)
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(term : Computes[E]) => TermGrammar(term)
   }
 
@@ -196,7 +196,7 @@ class TermGrammar[E : Type](val term : Computes[E]) extends GrammarComputable[E,
 class EOFTermGrammar[E : Type] extends GrammarComputable[E,Unit] {
 
   def toComputesSeq = Seq.empty
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq() => EOFTermGrammar()
   }
 
@@ -213,7 +213,7 @@ class EOFTermGrammar[E : Type] extends GrammarComputable[E,Unit] {
 class AnyTermGrammar[E : Type] extends GrammarComputable[E,E] {
 
   def toComputesSeq = Seq.empty
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq() => AnyTermGrammar()
   }
 
@@ -256,7 +256,7 @@ class FailGrammar[E : Type, T : Type](var err : Computes[Error]) extends Grammar
 class FlatMapGrammar[E : Type, T1 : Type, T2 : Type](var g : Computes[Grammar[E,T1]], var fn : Computes[T1|=>Grammar[E,T2]]) extends GrammarComputable[E,T2] {
 
   def toComputesSeq = Seq(g, fn)
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(g : Computes[Grammar[E,T1]], fn : Computes[T1|=>Grammar[E,T2]]) => FlatMapGrammar(g, fn)
   }
 
@@ -276,7 +276,7 @@ class FlatMapGrammar[E : Type, T1 : Type, T2 : Type](var g : Computes[Grammar[E,
 class DisjunctGrammar[E : Type, T : Type](var left : Computes[Grammar[E,T]], var right : Computes[Grammar[E,T]]) extends GrammarComputable[E,T] {
   
   def toComputesSeq = Seq(left, right)
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(left : Computes[Grammar[E,T]], right : Computes[Grammar[E,T]]) => DisjunctGrammar(left, right)
   }
 
@@ -295,7 +295,7 @@ class DisjunctGrammar[E : Type, T : Type](var left : Computes[Grammar[E,T]], var
 class TryGrammar[E : Type, T : Type](var g : Computes[Grammar[E,T]]) extends GrammarComputable[E,T] {
   
   def toComputesSeq = Seq(g)
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(g : Computes[Grammar[E,T]]) => TryGrammar(g)
   }
 

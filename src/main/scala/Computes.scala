@@ -47,7 +47,7 @@ abstract class Computable[T : Type] extends Computes[T] {
 final class ComputesVar[T : Type]() extends Computes[T] {
   val auxVar = this
   
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(keyCtx : KeyContext) = ???
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
   def toComputesSeq = Seq.empty
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
 }
@@ -69,7 +69,7 @@ final class ComputesIndirect[T : Type](var binding : Computes[T]) extends Comput
 final class ComputesBinding[V, T : Type](val name : ComputesVar[V], val value : Computes[V], val body : Computes[T]) extends Computes[T] {
   val auxVar = ComputesVar[T]()
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
   def toComputesSeq = Seq(value, body)
 
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
@@ -78,7 +78,7 @@ final class ComputesBinding[V, T : Type](val name : ComputesVar[V], val value : 
 final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn : given QuoteContext => Seq[Expr[_]] => Expr[T]) extends Computes[T] {
   val auxVar = ComputesVar[T]()
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = ComputesExpr(seq, exprFn)
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ComputesExpr(seq, exprFn)
   def toComputesSeq = parameters
   
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
@@ -87,7 +87,7 @@ final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn
 final class ComputesApplication[FnType, Result : Type](val arguments : Seq[Computes[_]], val function : Computes[FnType]) extends Computes[Result] {
   val auxVar = ComputesVar[Result]()
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(function : Computes[FnType], arguments :_*) => ComputesApplication(arguments.asInstanceOf[Seq[Computes[_]]], function)
   }
   def toComputesSeq = function +: arguments
@@ -99,7 +99,7 @@ class ComputesLazyRef[T : Type](ref : =>Computes[T]) extends Computes[T] {
   val auxVar = ComputesVar[T]()
   lazy val computes = ref
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(computes : Computes[T]) => ComputesLazyRef(computes)
   }
   def toComputesSeq = Seq(computes)
@@ -110,7 +110,7 @@ class ComputesLazyRef[T : Type](ref : =>Computes[T]) extends Computes[T] {
 class ComputesFunction[FnType <: Computes.==>[_,Result] : Type, Result : Type](val inst : Computes.FnInst[FnType], val parameters : Seq[ComputesVar[_]], val body : Computes[Result]) extends Computes[FnType] {
   val auxVar = ComputesVar[FnType]()
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
   def toComputesSeq = Seq(body)
 
   def tryFold(implicit opCts : OpContext, keyCtx : KeyContext) = None
@@ -135,7 +135,7 @@ final class ComputesSwitch[Arg, Result : Type](
     impl(cases, ArrayBuffer())
   }
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) =
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) =
     if seq.length % 2 == 0 then {
       seq match {
         case Seq(argument : Computes[Arg], default : Computes[Result], casesUnpaired :_*) =>
@@ -547,6 +547,7 @@ object Computes {
                       case ((name : ComputesVar[t], value), body) =>
                         // these two types should be the same, and this convinces the type system this is so
                         type VT = t
+                        implicit val e1 = body.tType
                         value match {
                           case v : Computes[VT] =>
                             ComputesBinding[t, T](name, v, body)
@@ -1243,7 +1244,7 @@ object Computes {
   implicit class ComputesTuple2[T1 : Type, T2 : Type](val tuple : (Computes[T1],Computes[T2])) extends Computable[(T1,T2)] {
 
     def toComputesSeq = Seq(tuple._1, tuple._2)
-    def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCts : KeyContext) = seq match {
+    def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCts : KeyContext) = seq match {
       case Seq(left : Computes[T1], right : Computes[T2]) => ComputesTuple2((left, right))
     }
 
@@ -1259,18 +1260,18 @@ object Computes {
 
   implicit class ComputesTuple2Ops[T1 : Type, T2 : Type](lhs : Computes[(T1,T2)]) {
     def _1 : Computes[T1] =
-      expr(lhs, lhs => '{ ${ lhs }._1 })
+      expr1(lhs, lhs => '{ ${ lhs }._1 })
     def _2 : Computes[T2] =
-      expr(lhs, lhs => '{ ${ lhs }._2 })
+      expr1(lhs, lhs => '{ ${ lhs }._2 })
   }
 
   implicit class ComputesListOps[T : Type](lhs : Computes[List[T]]) {
     def isEmpty : Computes[Boolean] =
-      expr(lhs, lhs => '{ ${ lhs }.isEmpty })
+      expr1(lhs, lhs => '{ ${ lhs }.isEmpty })
     def head : Computes[T] =
-      expr(lhs, lhs => '{ ${ lhs }.head })
+      expr1(lhs, lhs => '{ ${ lhs }.head })
     def tail : Computes[List[T]] =
-      expr(lhs, lhs => '{ ${ lhs }.tail })
+      expr1(lhs, lhs => '{ ${ lhs }.tail })
   }
 
   implicit class ComputesSwitchOp[Lhs](lhs : Computes[Lhs]) {
@@ -1285,14 +1286,14 @@ object Computes {
   def const[T : Type : Liftable](v : T) : Computes[T] =
     ComputesExpr(Nil, es => v.toExpr)
 
-  type ComputesToExpr[C <: Computes[_]] = C match { case Computes[t] => Expr[t] }
+  type ComputesToExpr[C] = C match { case Computes[t] => Expr[t] }
 
   /*trait Computes2Expr[In <: Tuple, Out <: Tuple]
 
   given C2E [T, Tl <: Tuple, Ttl <: Tuple] as Computes2Expr[Computes[T] *: Tl, Expr[T] *: Ttl] given (fTl : Computes2Expr[Tl,Ttl])
   given C2EBase as Computes2Expr[Unit,Unit]*/
 
-  def expr[T : Type, Param](param : Computes[Param], body : given QuoteContext => Expr[Param] => Expr[T]) given implicits.Not[Param <:< Tuple] : Computes[T] =
+  def expr1[T : Type, Param](param : Computes[Param], body : given QuoteContext => Expr[Param] => Expr[T]) : Computes[T] =
     ComputesExpr(
       List(param),
       exprs => body(exprs.head.asInstanceOf[Expr[Param]]))
@@ -1303,7 +1304,7 @@ object Computes {
       params.toArray.toList.asInstanceOf[List[Computes[_]]],
       exprs => body(exprs.foldRight(() : Tuple)((hd, tl) => hd *: tl).asInstanceOf[Tuple.Map[Params,ComputesToExpr]]))*/
 
-  def expr[T : Type, Params <: Tuple](params : Params, body : Tuple.Map[Params,ComputesToExpr] => Expr[T]) : Computes[T] =
+     def expr[T : Type, Params <: Tuple](params : Params, body : given QuoteContext => Tuple.Map[Params,ComputesToExpr] => Expr[T]) : Computes[T] =
     ComputesExpr(
       params.toArray.toList.asInstanceOf[List[Computes[_]]],
       exprs => body(exprs.foldRight(() : Tuple)((hd, tl) => hd *: tl).asInstanceOf[Tuple.Map[Params,ComputesToExpr]]))
@@ -1311,8 +1312,6 @@ object Computes {
 }
 
 import Computes._
-
-//val nil : Computes[Nil] = expr((), _ => '{ Nil })
 
 val add1 : Computes[Int|=>Int] =
   (i : Computes[Int]) => i+const(1)
@@ -1345,9 +1344,9 @@ val unimap : Computes[(List[Int],Int|=>Int)==>List[Int]] =
 
 val unimap2 : Computes[(List[Int],Int|=>Int)|=>List[Int]] =
   (args : Computes[(List[Int],Int|=>Int)]) =>
-    let(expr(args, args => '{ ${ args }._1 }),
+    let(expr1(args, args => '{ ${ args }._1 }),
       (list : Computes[List[Int]]) =>
-        let(expr(args, args => '{ ${ args }._2 }),
+        let(expr1(args, args => '{ ${ args }._2 }),
           (fn : Computes[Int|=>Int]) =>
             list.isEmpty.switch(
               List(
