@@ -15,7 +15,9 @@ trait KeyContext {
   def getKeyOf(obj : AnyRef) : ComputesKey
 }
 
-trait OpContext { }
+trait OpContext {
+  def resolve[T](computes : Computes[T])(implicit keyCtx : KeyContext) : Computes[T]
+}
 
 sealed abstract class Computes[T : Type] {
   val tType = implicitly[Type[T]]
@@ -26,7 +28,7 @@ sealed abstract class Computes[T : Type] {
   def auxKey(implicit keyCtx : KeyContext) = keyCtx.getKeyOf(k2)
   val auxVar : ComputesVar[T]
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) : Computes[T]
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) : Computes[T]
   def toComputesSeq : Seq[Computes[_]]
 
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) : Option[Computes[T]]
@@ -45,7 +47,7 @@ abstract class Computable[T : Type] extends Computes[T] {
 final class ComputesVar[T : Type]() extends Computes[T] {
   val auxVar = this
   
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(keyCtx : KeyContext) = ???
   def toComputesSeq = Seq.empty
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
 }
@@ -53,7 +55,7 @@ final class ComputesVar[T : Type]() extends Computes[T] {
 final class ComputesIndirect[T : Type](var binding : Computes[T]) extends Computes[T] {
   val auxVar = ComputesVar[T]()
 
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
   def toComputesSeq =
     if binding != null then {
       Seq(binding)
@@ -73,7 +75,7 @@ final class ComputesBinding[V, T : Type](val name : ComputesVar[V], val value : 
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = ???
 }
 
-final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn : Seq[Expr[_]] => Expr[T]) extends Computes[T] {
+final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn : given QuoteContext => Seq[Expr[_]] => Expr[T]) extends Computes[T] {
   val auxVar = ComputesVar[T]()
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = ComputesExpr(seq, exprFn)
@@ -157,11 +159,11 @@ object Computes {
   class ==>[-Args <: Tuple, +Result](val pc : Int, val closure : Array[Any])
 
   trait FnInst[F <: (_==>_)] {
-    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) : Expr[F]
+    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) given QuoteContext : Expr[F]
   }
 
   implicit def Inst_==>[A <: Tuple,R] : FnInst[A==>R] = new {
-    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) = '{ ==>(${ pc }, ${ closure }) }
+    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) given QuoteContext = '{ ==>(${ pc }, ${ closure }) }
   }
 
   type |=>[-Args, +Result] = Tuple1[Args]==>Result
@@ -304,167 +306,327 @@ object Computes {
     iter(computes)
   }
 
-  implicit object TheOpContext extends OpContext { }
-
   trait RewriteAction {
     def apply[T](computes : Computes[T])(implicit opCtx : OpContext) : Option[Computes[T]]
   }
 
   def rewrite[T](computes : Computes[T], action : RewriteAction)(implicit keyCtx : KeyContext) : Computes[T] = {
 
-    final case class Result[T](val computes : Computes[T], val scopeTaint : Set[ComputesKey])
+    // this is the context in which impl operates
+    final case class InCtx(
+      // things that should be substituted with a known value (and OutCtx) rather than reprocessed
+      val substitutions : Map[ComputesKey,(Computes[_],OutCtx)],
+      val known : Map[ComputesKey,Computes[_]])
 
-    val substitutions = HashMap[ComputesKey,Computes[_]]()
-    val taintSets = HashMap[ComputesKey,Set[ComputesKey]]()
-    val isRecursive = HashSet[Computes[_]]()
+    object InCtx {
+      def empty = InCtx(
+        substitutions=Map.empty,
+        known=Map.empty)
+    }
 
-    def impl[T](computes : Computes[T], scope : Map[ComputesKey,Computes[_]]) : Result[T] = {
+    final case class OutCtx(
+      val isRecursive : Set[Computes[_]],
+      val isReferenced : Set[ComputesKey],
+      val substituted : Map[ComputesKey,(Computes[_],OutCtx)]
+    ) {
+      def merge(other : OutCtx) : OutCtx =
+        OutCtx(
+          isRecursive=isRecursive ++ other.isRecursive,
+          isReferenced=isReferenced ++ other.isReferenced,
+          substituted=substituted ++ other.substituted)
+    }
 
-      val resolvedVars = HashSet[ComputesKey]()
+    object OutCtx {
+      def empty =
+        OutCtx(
+          isRecursive=Set.empty,
+          isReferenced=Set.empty,
+          substituted=Map.empty)
+    }
 
-      def resolve[T](computes : Computes[T]) : Computes[T] =
-        if scope.contains(computes.key) then {
-          resolvedVars += computes.key
-          scope(computes.key).asInstanceOf[Computes[T]]
-        } else {
-          computes
-        }
-
-      // this is the general case - it is referenced in two places so it is its own function
-      def generalProc[T](computes : Computes[T], scope : Map[ComputesKey,Computes[_]]) : Result[T] = {
-        val indirect = ComputesIndirect[T](null)(computes.tType)
-        substitutions(computes.key) = indirect
-
-        val seq = computes.toComputesSeq.map(c => scope.getOrElse(c.key, c))
-        val (mapped, taints) = seq.map(impl(_, scope)).map({
-          case Result(r, t) => (r, t)
-        }).unzip
-
-        val recTaints = taints.foldLeft(Set.empty : Set[ComputesKey])((acc, t) => acc ++ t)
-
-        val beforeAction = computes.likeFromSeq(mapped)
-        val folded = action(beforeAction) match {
-          case Some(f) => f
-          case None => beforeAction
-        }
-
-        if isRecursive(indirect) then {
-          indirect.binding = folded
-          // subtle point: we need to alias the original to the binding or we will spuriously reprocess the original
-          // we alias the indirect to itself because we have finished processing it
-          substitutions(computes.key) = indirect.binding
-          substitutions(indirect.key) = indirect
-          Result(indirect, recTaints)
-        } else {
-          substitutions(computes.key) = folded
-          Result(folded, recTaints)
-        }
-      }
-
-      if substitutions.contains(computes.key) then {
-        substitutions(computes.key).asInstanceOf[Computes[T]] match {
-          case c : ComputesIndirect[T] => {
-            if c.binding == null then {
-              isRecursive += c // avoid using keys here to avoid wasting a ComputesKey per impl(_) invocation
-            }
-            Result(c, Set.empty)
-          }
-          case c => Result(c, Set.empty)
+    // Ensure that all subtrees not in substitutions are entirely new identity-wise.
+    // This is to solve the problem of the same subtree being repeated in different contexts during rewrite.
+    // This code will ensure that any repetitions of some subtree will have a different object identity
+    // so the main impl can just assume that there will be no conflicts between substitutions, avoiding situations
+    // where for example a common function gets inlined one way, the inlined body stays in substitutions, and on a second
+    // inline of the same function the first inlined body gets pulled from substitutions instead of properly computing the new inlined
+    // body.
+    // Instead, that common function will simply be duplicated, so each instance's function body (and all other parts) will have a different
+    // object identity, ensuring that any issues of that kind never happen.
+    def disambiguate[T](computes : Computes[T], inCtx : InCtx) : (Computes[T],OutCtx) = {
+      if inCtx.substitutions.contains(computes.key) then {
+        inCtx.substitutions.contains(computes.key).asInstanceOf[(Computes[T],OutCtx)] match {
+          case (c : ComputesIndirect[T], _) if c.binding == null =>
+            (c, OutCtx(
+              isRecursive=Set(c),
+              isReferenced=Set.empty,
+              substituted=Map.empty))
+          case (c, outCtx) =>
+            (c, outCtx.copy(substituted=outCtx.substituted + ((computes.key, (c, outCtx)))))
         }
       } else {
-        val result = computes match {
-          case c : ComputesLazyRef[T] => {
-            impl(c.computes, scope) // unconditionally erase lazy refs, they add nothing
-          }
-          case c : ComputesVar[T] => {
-            if scope.contains(c.key) then {
-              resolvedVars += computes.key
-              impl(scope(c.key).asInstanceOf[Computes[T]], scope - c.key)
-            } else {
-              Result(c, Set.empty) // must be a new var post-substitution
-            }
-          }
-          case c : ComputesApplication[fn,T] => {
-            resolve(c.function) match {
-              case f : ComputesFunction[fn, T] => {
-                impl(
-                  f.body,
-                  scope ++ (f.parameters.map(_.key) zip c.arguments.map(resolve(_)))) match {
-                  case Result(r, taintSet) => {
-                    val toClear = taintSets.getOrElse(computes.key, Set.empty)
-                    substitutions --= toClear
-                    taintSets -= computes.key
-                    Result(r, taintSet -- toClear)
-                  }
-                }
-              }
-              case f => {
-                generalProc(c, scope) // if you can't inline, just give up and process c the generic way
-              }
-            }
-          }
-          case c : ComputesFunction[fn,r] => {
-            val newParams = c.parameters.map({
-              case v : ComputesVar[v] =>
-                ComputesVar[v]()(v.tType)
-            })
-            substitutions ++= (c.parameters.map(_.key) zip newParams)
-            impl(c.body, scope) match {
-              case Result(body, taints) => {
-                type f <: _ ==> r
-                Result(
-                  ComputesFunction[f,r](
-                    c.inst.asInstanceOf[FnInst[f]],
-                    newParams,
-                    body)
-                  (
-                    c.tType.asInstanceOf[Type[f]],
-                    c.body.tType).asInstanceOf[Computes[T]],
-                  taints)
-              }
-            }
-          }
-          case c : ComputesBinding[v,T] => {
-            var newBind = ComputesVar[v]()(c.name.tType)
-            val Result(value, taints1) = impl(c.value, scope)
-            substitutions(c.name.key) = newBind
-            val Result(body, taints2) = impl(c.body, scope)
-            Result(ComputesBinding(newBind, value, body)(c.tType), taints1 ++ taints2)
-          }
+        computes match {
           case c : ComputesIndirect[T] => {
-            if c.binding != null then { // if binding is null we are in a recursive call that will eventually set binding
-              val newInd = ComputesIndirect[T](null)(c.tType)
-              substitutions(computes.key) = newInd
-              // if processing inside a cycle, set the binding to null to ensure there is no way to follow the cycle from inside the cycle
-              val oldBinding = c.binding
-              c.binding = null
-              
-              val Result(newBind, taints) = impl(oldBinding, scope)
-              newInd.binding = newBind
-              Result(newInd, taints)
-            } else {
-              ??? // you should never reach a null indirect - it should always have an entry in substitutions
-            }
-          }
-          case c => generalProc(c, scope)
-        }
+            Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
+            val newInd = ComputesIndirect[T](null)(c.tType)
+            val oldBinding = c.binding
+            // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
+            c.binding = null
+            
+            val (newBind, outCtx) = disambiguate(oldBinding, inCtx.copy(substitutions=inCtx.substitutions + ((c.key, (newInd, null)))))
+            newInd.binding = newBind
+            c.binding = oldBinding
 
-        result match {
-          case Result(r, taints) => {
-            val completeTaints = taints ++ resolvedVars
-            for(t <- completeTaints) {
-              val set = taintSets.getOrElse(t, Set.empty)
-              taintSets(t) = set + computes.key
+            (newInd, outCtx.copy(substituted=outCtx.substituted + ((c.key, (newInd, outCtx)))))
+          }
+          case _ => {
+            val indirect = ComputesIndirect[T](null)(computes.tType)
+            val innerCtx = inCtx.copy(substitutions=inCtx.substitutions + ((computes.key, (indirect, null))))
+            
+            val (result, outCtx) = computes match {
+              case c : ComputesLazyRef[T] =>
+                impl(c.computes, innerCtx) // unconditionally erase lazy refs, they add nothing
+              case c : ComputesVar[T] =>
+                ??? // all vars should be substituted with new ones, so that even if they aren't globally unique per definition
+                    // originally, they will be after a rewrite
+              case c : ComputesFunction[fn,r] => {
+                val pKeys = c.parameters.map(_.key)
+                val newParams = c.parameters.map({
+                  case v : ComputesVar[v] =>
+                    ComputesVar[v]()(v.tType)
+                })
+                val newParamPairs = newParams zip newParams.map(_ => OutCtx.empty)
+                val (body, outCtx) = impl(c.body, innerCtx.copy(substitutions=innerCtx.substitutions ++ (pKeys zip newParamPairs)))
+                type f <: _ ==> r
+                val result = ComputesFunction[f,r](
+                  c.inst.asInstanceOf[FnInst[f]],
+                  newParams,
+                  body)(c.tType.asInstanceOf[Type[f]], c.body.tType).asInstanceOf[Computes[T]]
+                (result, outCtx)
+              }
+              case c : ComputesBinding[v,T] => {
+                val newBind = ComputesVar[v]()(c.name.tType)
+                val (value, vOutCtx) = impl(c.value, innerCtx)
+                val (body, bOutCtx) = impl(
+                  c.body,
+                  innerCtx.copy(
+                    substitutions=innerCtx.substitutions + ((c.name.key, (newBind, vOutCtx)))))
+
+                (
+                  ComputesBinding(newBind, value, body)(c.tType),
+                  vOutCtx.merge(bOutCtx))
+              }
+              case c => {
+                val seq = computes.toComputesSeq
+                val (mapped, outCtxs) = seq.map(impl(_, inCtx)).unzip
+                val outCtx = outCtxs.reduce(_.merge(_))
+
+                (computes.likeFromSeq(mapped), outCtx)
+              }
             }
-            Result(r, completeTaints)
+
+            // if back-references were constructed with indirect, this must be the "top" of a cycle so inject indirect into the program
+            // otherwise we discard indirect and never speak of it again (since it is neither referenced not needed)
+            if outCtx.isRecursive(indirect) then { 
+              indirect.binding = result
+              // subtle point: we need to alias the original to the binding or we will spuriously reprocess the original
+              // we alias the indirect to itself because if we find it again the correct result is to just re-insert it
+              val outCtx2 = outCtx.copy(substituted=outCtx.substituted + ((computes.key, (indirect.binding, outCtx))))
+              (
+                indirect,
+                outCtx2.copy(
+                  substituted=outCtx2.substituted + ((indirect.key, (indirect, outCtx2)))))
+            } else {
+              (
+                result,
+                outCtx.copy(
+                  substituted=outCtx.substituted + ((computes.key, (result, outCtx)))))
+            }
           }
         }
       }
     }
 
-    val Result(result, taints) = impl(computes, Map.empty)
-    println(taints)
-    Predef.assert(taints.isEmpty)
+    def impl[T](computes : Computes[T], inCtx : InCtx) : (Computes[T],OutCtx) = {
+
+      // this is the general case - it is referenced in two places so it is its own function
+      def generalProc[T](computes : Computes[T], inCtx : InCtx) : (Computes[T],OutCtx) = {
+        val seq = computes.toComputesSeq
+        val (mapped, outCtxs) = seq.map(impl(_, inCtx)).unzip
+        val outCtx = outCtxs.reduce(_.merge(_))
+
+        val beforeAction = computes.likeFromSeq(mapped)
+
+        implicit val opCtx : OpContext = new {
+          def resolve[T](computes : Computes[T])(implicit keyCtx : KeyContext) : Computes[T] =
+            inCtx.known.getOrElse(computes.key, computes).asInstanceOf[Computes[T]]
+        }
+        
+        action(beforeAction) match {
+          case Some(f) => {
+            // clone any parts of f that have not yet been touched. see notes on disambiguate for why this is important
+            val (f2, _) = disambiguate(
+              f,
+              InCtx(
+                substitutions=outCtx.substituted,
+                known=null))
+            // reprocess the action result, adding all of outCtx.substituted to the substitutions so we don't reprocess anything
+            // we've already seen before. This should specifically recurse over only new nodes.
+            impl(
+              f2,
+              inCtx.copy(
+                substitutions=inCtx.substitutions ++ outCtx.substituted))
+          }
+          case None => (beforeAction, outCtx)
+        }
+      }
+
+      if inCtx.substitutions.contains(computes.key) then {
+        inCtx.substitutions(computes.key).asInstanceOf[(Computes[T],OutCtx)] match {
+          case (c : ComputesIndirect[T], _) if c.binding == null =>
+            (c, OutCtx(
+              isRecursive=Set(c),
+              isReferenced=Set.empty,
+              substituted=Map.empty)) // ignoring outCtx here will only matter if a var is referenced above its own declaration
+                                      // which is wrong anyway, and can only happen with unsound mutually referential ASTs
+          case (c : ComputesVar[T], _) =>
+            (c, OutCtx(
+              isRecursive=Set.empty,
+              isReferenced=Set(c.key),
+              substituted=Map.empty)) // this is a leaf node, so outCtx must have been empty
+          case (c, outCtx) =>
+            (c, outCtx.copy(substituted=outCtx.substituted + ((computes.key, (c, outCtx)))))
+        }
+      } else {
+        computes match {
+          case c : ComputesIndirect[T] => {
+            Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
+            val newInd = ComputesIndirect[T](null)(c.tType)
+            val oldBinding = c.binding
+            // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
+            c.binding = null
+            
+            val (newBind, outCtx) = impl(oldBinding, inCtx.copy(substitutions=inCtx.substitutions + ((c.key, (newInd,null)))))
+            newInd.binding = newBind
+            c.binding = oldBinding
+
+            // if somehow an indirect does not contain any back-references, remove the indirect
+            if !outCtx.isRecursive(c) then {
+              (newBind, outCtx.copy(substituted=outCtx.substituted + ((c.key, (newBind, outCtx)))))
+            } else {
+              (newInd, outCtx.copy(substituted=outCtx.substituted + ((c.key, (newInd, outCtx)))))
+            }
+          }
+          case _ => {
+            val indirect = ComputesIndirect[T](null)(computes.tType)
+            val innerCtx = inCtx.copy(substitutions=inCtx.substitutions + ((computes.key, (indirect, null))))
+
+            def resolve[T](computes : Computes[T]) : Computes[T] = {
+              val c = innerCtx.substitutions.getOrElse(computes.key, computes).asInstanceOf[Computes[T]]
+              innerCtx.known.getOrElse(c.key, c).asInstanceOf[Computes[T]] match {
+                case cc : ComputesLazyRef[T] =>
+                  resolve(cc.computes)
+                case cc => cc
+              }
+            }
+            
+            val (result, outCtx) = computes match {
+              case c : ComputesLazyRef[T] =>
+                impl(c.computes, innerCtx) // unconditionally erase lazy refs, they add nothing
+              case c : ComputesVar[T] =>
+                ??? // all vars should be substituted with new ones, so that even if they aren't globally unique per definition
+                    // originally, they will be after a rewrite
+              case c : ComputesApplication[fn,T] => {
+                resolve(c.function) match {
+                  case f : ComputesFunction[fn, T] => {
+                    val pKeys = f.parameters.map(_.key)
+                    val (args, outCtxs) = c.arguments.map(impl(_, innerCtx)).unzip
+
+                    // bind all the arguments so they process left to right
+                    val inlined = (f.parameters zip args).foldRight(f.body)({
+                      case ((name : ComputesVar[t], value), body) =>
+                        // these two types should be the same, and this convinces the type system this is so
+                        type VT = t
+                        value match {
+                          case v : Computes[VT] =>
+                            ComputesBinding[t, T](name, v, body)
+                        }
+                    })
+
+                    // process the result via the Binding case, allowing for things like arguments never being referenced
+                    // and being accessed and inlined via InCtx.known, etc...
+                    val (result, outCtx) = impl(inlined, innerCtx)
+                    
+                    (result, outCtxs.reduce(_.merge(_)).merge(outCtx))
+                  }
+                  case _ => {
+                    generalProc(c, innerCtx) // if you can't inline, just give up and process c the generic way
+                  }
+                }
+              }
+              case c : ComputesFunction[fn,r] => {
+                val pKeys = c.parameters.map(_.key)
+                val newParams = c.parameters.map({
+                  case v : ComputesVar[v] =>
+                    ComputesVar[v]()(v.tType)
+                })
+                val newParamPairs = newParams zip (newParams.map(_ => null))
+
+                val (body, outCtx) = impl(c.body, innerCtx.copy(substitutions=innerCtx.substitutions ++ (pKeys zip newParamPairs)))
+                type f <: _ ==> r
+                val result = ComputesFunction[f,r](
+                  c.inst.asInstanceOf[FnInst[f]],
+                  newParams,
+                  body)(c.tType.asInstanceOf[Type[f]], c.body.tType).asInstanceOf[Computes[T]]
+                (result, outCtx)
+              }
+              case c : ComputesBinding[v,T] => {
+                val newBind = ComputesVar[v]()(c.name.tType)
+                val (value, vOutCtx) = impl(c.value, innerCtx)
+                val (body, bOutCtx) = impl(
+                  c.body,
+                  innerCtx.copy(
+                    substitutions=innerCtx.substitutions + ((c.name.key, (newBind, vOutCtx))),
+                    known=innerCtx.known + ((newBind.key, value))))
+
+                // if the body contains no references to newBind, it means value is not needed and we can completely elide this binding
+                if bOutCtx.isReferenced(newBind.key) then {
+                  (
+                    ComputesBinding(newBind, value, body)(c.tType),
+                    vOutCtx.merge(bOutCtx))
+                } else {
+                  (body, bOutCtx)
+                }
+              }
+              case c => generalProc(c, innerCtx) 
+            }
+
+            // if back-references were constructed with indirect, this must be the "top" of a cycle so inject indirect into the program
+            // otherwise we discard indirect and never speak of it again (since it is neither referenced not needed)
+            if outCtx.isRecursive(indirect) then { 
+              indirect.binding = result
+              // subtle point: we need to alias the original to the binding or we will spuriously reprocess the original
+              // we alias the indirect to itself because if we find it again the correct result is to just re-insert it
+              val outCtx2 = outCtx.copy(substituted=outCtx.substituted + ((computes.key, (indirect.binding, outCtx))))
+              (
+                indirect,
+                outCtx2.copy(
+                  substituted=outCtx2.substituted + ((indirect.key, (indirect, outCtx2)))))
+            } else {
+              (
+                result,
+                outCtx.copy(
+                  substituted=outCtx.substituted + ((computes.key, (result, outCtx)))))
+            }
+          }
+        }
+      }
+    }
+
+    val (dis, _) = disambiguate(computes, InCtx.empty)
+    val (result, _) = impl(dis, InCtx.empty)
+    println("REWRITE")
+    printComputes(result)
     result
   }
 
@@ -483,8 +645,8 @@ object Computes {
         }
     })
 
-  type BasicBlock = (Map[ComputesKey,Int],Map[ComputesKey,Expr[_]],Expr[Any],Expr[Any]=>Expr[Unit], Expr[Int]=>Expr[Unit], Reflection)=>Expr[Unit]
-  type Continuation[T] = (Expr[T],Map[ComputesKey,Int],Map[ComputesKey,Expr[_]],Expr[Any],Expr[Any]=>Expr[Unit], Expr[Int]=>Expr[Unit], Reflection)=>Expr[Unit]
+  type BasicBlock = given QuoteContext => (Map[ComputesKey,Int],Map[ComputesKey,Expr[_]],Expr[Any],Expr[Any]=>Expr[Unit], Expr[Int]=>Expr[Unit]) => Expr[Unit]
+  type Continuation[T] = given QuoteContext => (Expr[T],Map[ComputesKey,Int],Map[ComputesKey,Expr[_]],Expr[Any],Expr[Any]=>Expr[Unit], Expr[Int]=>Expr[Unit])=>Expr[Unit]
 
   def getBasicBlocks[T](computes : Computes[T])(implicit keyCtx : KeyContext) : List[(ComputesKey,BasicBlock)] = {
 
@@ -535,7 +697,7 @@ object Computes {
     ;{
       val visitedSet = HashSet[ComputesKey]()
 
-      def bindVars(names : List[ComputesVar[_]], values : List[Expr[_]], reflection : Reflection, scope : Map[ComputesKey,Expr[_]]=>Expr[Unit]) : Expr[Unit] = {
+      def bindVars(names : List[ComputesVar[_]], values : List[Expr[_]], scope : Map[ComputesKey,Expr[_]]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
         /*import reflection._
         val vMap = HashMap[ComputesKey,Expr[_]]()
         val statements = (names zip values).flatMap({
@@ -574,8 +736,8 @@ object Computes {
         doIt(names zip values, Map.empty)
       }
 
-      def pushClosure(values : List[Expr[_]], pushData : Expr[Any]=>Expr[Unit], reflection : Reflection, scope : Expr[Unit]) : Expr[Unit] = {
-        import reflection._
+      def pushClosure(values : List[Expr[_]], pushData : Expr[Any]=>Expr[Unit], scope : Expr[Unit]) given (qctx : QuoteContext) : Expr[Unit] = {
+        import qctx.tasty._
         Block(
           values.map(pushData(_).unseal),
           scope.unseal).seal.cast[Unit]
@@ -595,15 +757,15 @@ object Computes {
               inClosure = orderedSetMerge(inClosure, nodeClosures(next))
             }
             val fullClosure = orderedSetMerge(inClosure, resultClosure)
-            (s.key, impl(s, fullClosure, (v, pcMap, vMap, popData, pushData, pushPC, reflection) => {
+            (s.key, impl(s, fullClosure, (v, pcMap, vMap, popData, pushData, pushPC) => {
               if !singleUse then {
                 implicit val e1 = s.tType
                 '{
                   val bind = ${ v }
-                  ${ after(pcMap, vMap + ((s.auxVar.key, '{ bind })), popData, pushData, pushPC, reflection) }
+                  ${ after(pcMap, vMap + ((s.auxVar.key, '{ bind })), popData, pushData, pushPC) }
                 }
               } else {
-                after(pcMap, vMap + ((s.auxVar.key, v)), popData, pushData, pushPC, reflection)
+                after(pcMap, vMap + ((s.auxVar.key, v)), popData, pushData, pushPC)
               }
             }))
           }
@@ -624,31 +786,31 @@ object Computes {
                   visitedSet += c.binding.key
                   val body = impl(c.binding, closure, null)
                   val reverseClosure = nodeClosures(c.binding.key).reverse
-                  blocks += ((c.binding.key, (pcMap, vMap, popData, pushData, pushPC, reflection) => {
-                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
+                  blocks += ((c.binding.key, (pcMap, vMap, popData, pushData, pushPC) => {
+                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
                       //print("l clos "); print(vMap ++ vMap2); println(c)
-                      body(pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
+                      body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
                     })
                   }))
                 }
                 if cont != null then {
-                  blocks += ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC, reflection) => {
+                  blocks += ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC) => {
                     val reverseClosure = closure.reverse
                     '{
                       val arg = ${ popData }.asInstanceOf[T]
                       ${
-                        bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
-                          cont('{ arg }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
+                        bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
+                          cont('{ arg }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
                         })
                       }
                     }
                   }))
                 }
-                (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+                (pcMap, vMap, popData, pushData, pushPC) => '{
                   ${
                     //print("l pre "); print(vMap); println(c)
                     if cont != null then {
-                      pushClosure(closure.map(v => vMap(v.key)), pushData, reflection, pushPC(pcMap(c.auxKey).toExpr))
+                      pushClosure(closure.map(v => vMap(v.key)), pushData, pushPC(pcMap(c.auxKey).toExpr))
                     } else {
                       '{}
                     }
@@ -656,31 +818,31 @@ object Computes {
                   ${
                     pushClosure(
                       nodeClosures(c.binding.key).map(v => vMap(v.key)),
-                      pushData, reflection, pushPC(pcMap(c.binding.key).toExpr))
+                      pushData, pushPC(pcMap(c.binding.key).toExpr))
                   }
                 }
               }
             }
           case c : ComputesVar[T] => {
-            (pcMap, vMap, popData, pushData, pushPC, reflection) => {
+            (pcMap, vMap, popData, pushData, pushPC) => {
               //println(s"v $vMap ${c.key}")
               if cont == null then
                 pushData(vMap(c.key))
               else
-                cont(vMap(c.key).asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC, reflection)
+                cont(vMap(c.key).asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC)
             }
           }
           case c : ComputesApplication[_,T] => {
             implicit val e1 = c.tType
             implicit val e2 = c.function.tType
             if cont != null then {
-              val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+              val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC) => '{
                 val ret = ${ popData }.asInstanceOf[T]
                 ${
                   val reverseClosure = closure.reverse
-                  bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
+                  bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
                     //print("app clos "); print(vMap ++ vMap2); println(c)
-                    cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
+                    cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
                   })
                 }
               }))
@@ -697,12 +859,12 @@ object Computes {
                 arg,
                 fullClosure,
                 if nextKey != NoKey then {
-                  (argVal, pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+                  (argVal, pcMap, vMap, popData, pushData, pushPC) => '{
                     ${
                       //print("arg "); print(vMap); println(arg)
                       pushData(argVal)
                     }
-                    ${ narg(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                    ${ narg(pcMap, vMap, popData, pushData, pushPC) }
                   }
                 } else null)
               arg.key
@@ -712,13 +874,13 @@ object Computes {
             if !c.arguments.isEmpty then {
               fullClosure = orderedSetMerge(fullClosure, nodeClosures(c.arguments.head.key))
             }
-            impl(c.function, fullClosure, (fn, pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+            impl(c.function, fullClosure, (fn, pcMap, vMap, popData, pushData, pushPC) => '{
               // if we have a continuation then push block to return to, else we are a leaf call
               ${
                 //println(s"app $vMap ${c.key} ${closure.map(_.key)}")
                 if cont != null then {
                   // push locals left to right
-                  pushClosure(closure.map(v => vMap(v.key)), pushData, reflection, pushPC(pcMap(c.auxKey).toExpr))
+                  pushClosure(closure.map(v => vMap(v.key)), pushData, pushPC(pcMap(c.auxKey).toExpr))
                 } else {
                   '{}
                 }
@@ -728,7 +890,7 @@ object Computes {
               ${ pushData('{ fnV.closure }) }
               ${
                 if !c.arguments.isEmpty then
-                  nextArg(pcMap, vMap, popData, pushData, pushPC, reflection)
+                  nextArg(pcMap, vMap, popData, pushData, pushPC)
                 else
                   '{}
               }
@@ -739,10 +901,10 @@ object Computes {
             if !visitedSet(c.key) then {
               visitedSet += c.key
               val body = impl(c.body, List.empty, null)
-              val block : (ComputesKey,BasicBlock) = ((c.body.key, (pcMap, vMap, popData, pushData, pushPC, reflection) => {
+              val block : (ComputesKey,BasicBlock) = ((c.body.key, (pcMap, vMap, popData, pushData, pushPC) => {
                 val reverseParams = c.parameters.reverse
                 val fClosure = nodeClosures(c.key)
-                bindVars(reverseParams.toList, reverseParams.map(p => '{ ${ popData }.asInstanceOf[${ p.tType }] }).toList, reflection, vMap2 => '{
+                bindVars(reverseParams.toList, reverseParams.map(p => '{ ${ popData }.asInstanceOf[${ p.tType }] }).toList, vMap2 => '{
                   val closureVal = ${ popData }.asInstanceOf[Array[Any]]
                   ${
                     //print("fn args "); print(vMap ++ vMap2); println(c)
@@ -750,17 +912,16 @@ object Computes {
                       fClosure,
                       for((v, i) <- fClosure.zipWithIndex)
                         yield '{ closureVal(${ i.toExpr }).asInstanceOf[${ v.tType }] },
-                      reflection,
                       vMap3 => {
                         //print("fn clos "); print(vMap3); println(c)
-                        body(pcMap, vMap ++ vMap2 ++ vMap3, popData, pushData, pushPC, reflection)
+                        body(pcMap, vMap ++ vMap2 ++ vMap3, popData, pushData, pushPC)
                       })
                   }
                 })
               }))
               blocks += block
             }
-            (pcMap, vMap, popData, pushData, pushPC, reflection) => {
+            (pcMap, vMap, popData, pushData, pushPC) => {
               implicit val e1 = c.tType
               println(s"CLOS ${c.key} ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
               val refs = nodeClosures(c.key).map(v => vMap(v.key))
@@ -781,7 +942,7 @@ object Computes {
                 ${
                   //print("ffn "); print(vMap); println(c)
                   if cont != null then
-                    cont('{ fn }.asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC, reflection)
+                    cont('{ fn }.asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC)
                   else
                     pushData('{ fn })
                 }
@@ -790,10 +951,10 @@ object Computes {
           }
           case c : ComputesBinding[_,T] => {
             val body = impl(c.body, closure, cont)
-            impl(c.value, closure, (value, pcMap, vMap, popData, pushData, pushPC, reflection) => 
-              bindVars(List(c.name), List(value), reflection, vMap2 => {
+            impl(c.value, closure, (value, pcMap, vMap, popData, pushData, pushPC) => 
+              bindVars(List(c.name), List(value), vMap2 => {
                 //print("bind "); print(vMap ++ vMap2); println(c)
-                body(pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
+                body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
               }))
           }
           case c : ComputesSwitch[_,T] => {
@@ -802,13 +963,13 @@ object Computes {
               implicit val e2 = c.argument.tType
 
               if cont != null then {
-                val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+                val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC) => '{
                   val ret = ${ popData }.asInstanceOf[T]
                   ${
                     val reverseClosure = closure.reverse
-                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), reflection, vMap2 => {
+                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
                       //print("switch clos "); print(vMap ++ vMap2); println(c)
-                      cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC, reflection)
+                      cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
                     })
                   }
                 }))
@@ -822,7 +983,7 @@ object Computes {
               // (which will fail is enough indirections happen)
               val bodyClosure = c.cases.map(a => nodeClosures(a._2.key)).foldLeft(closure)(orderedSetMerge)
               bindSequence(c.argument :: c.cases.map(_._1).toList, bodyClosure, true,
-                (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+                (pcMap, vMap, popData, pushData, pushPC) => '{
                   ${
                     if cont != null then '{
                       ${ pushPC(pcMap(c.auxKey).toExpr) }
@@ -837,7 +998,9 @@ object Computes {
                     }
                   }
                   ${
-                    import reflection._
+                    val qctx = implicitly[QuoteContext]
+                    import qctx.tasty._
+
                     val bloodSacrifice = '{
                       ${ vMap(c.argument.auxVar.key).asInstanceOf[Expr[AT]] } match {
                         case _ => ()
@@ -855,7 +1018,7 @@ object Computes {
                           val bloodSacrifice = '{
                             ${ vMap(c.argument.auxVar.key) } match {
                               case x if x == ${ vMap(v.auxVar.key) } =>
-                                ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                                ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC) }
                             }
                           }
                           // more hack because I can't generate var bindings myself
@@ -874,7 +1037,7 @@ object Computes {
                             // hack: steal default branch from donor match expression
                             val bloodSacrifice = '{
                               ${ vMap(c.argument.auxVar.key) } match {
-                                case _ => ${ d(pcMap, vMap, popData, pushData, pushPC, reflection) }
+                                case _ => ${ d(pcMap, vMap, popData, pushData, pushPC) }
                               }
                             }
                             bloodSacrifice.unseal match {
@@ -892,12 +1055,12 @@ object Computes {
             implicit val e1 = c.tType
 
             bindSequence(c.parameters.toList, closure, false,
-              (pcMap, vMap, popData, pushData, pushPC, reflection) => '{
+              (pcMap, vMap, popData, pushData, pushPC) => '{
                 val result = ${ c.exprFn(c.parameters.map(p => vMap(p.auxVar.key))) }
                 //println(s"result $result")
                 ${
                   if cont != null then {
-                    cont('{ result }, pcMap, vMap, popData, pushData, pushPC, reflection)
+                    cont('{ result }, pcMap, vMap, popData, pushData, pushPC)
                   } else {
                     pushData('{ result })
                   }
@@ -979,11 +1142,11 @@ object Computes {
   }
 
   def reifyCall[A1 : Type, R : Type](computes : Computes[A1|=>R], a1 : Expr[A1])
-                                    (implicit reflection : Reflection) = {
+                                    (implicit qctx : QuoteContext) = {
     reify(computes(expr((), _ => a1)))
   }
 
-  def reify[T : Type](computes : Computes[T])(implicit reflection: Reflection) = {
+  def reify[T : Type](computes : Computes[T])(implicit qctx: QuoteContext) = {
     var keyCounter = 0
     val keyMap = HashMap[AnyRef,ComputesKey]()
     implicit val keyCtx : KeyContext = new KeyContext {
@@ -1015,7 +1178,7 @@ object Computes {
 
     //println(blocks)
     val pcMap = basicBlocks.zipWithIndex.map((block, idx) => (block._1, idx)).toMap
-    import reflection._
+    import qctx.tasty._
     val expr = '{
       val pcStack = ArrayStack[Int]()
       val dataStack = ArrayStack[Any]()
@@ -1031,7 +1194,7 @@ object Computes {
             basicBlocks.map({
               case (key,block) =>
                 CaseDef(
-                  Pattern.Value(Literal(Constant.Int(pcMap(key)))),
+                  Pattern.Value(Literal(Constant(pcMap(key)))),
                   None,
                   '{
                     def indirect(pcStack : ArrayStack[Int], dataStack : ArrayStack[Any]) =
@@ -1041,8 +1204,7 @@ object Computes {
                           Map.empty,
                           '{ dataStack.pop },
                           v => '{ dataStack.push(${ v }) },
-                          pc => '{ pcStack.push(${ pc }) },
-                          reflection)
+                          pc => '{ pcStack.push(${ pc }) })
                       }
                     indirect(pcStack, dataStack)
                   }.unseal)
@@ -1064,11 +1226,11 @@ object Computes {
   } */
   
   implicit object LiftableNull extends Liftable[Null] {
-    def toExpr(x : Null) = '{ null }
+    def toExpr(x : Null) given QuoteContext = '{ null }
   }
 
   implicit object LiftableUnit extends Liftable[Unit] {
-    def toExpr(x : Unit) = '{ () }
+    def toExpr(x : Unit) given QuoteContext = '{ () }
   }
   
   implicit class ComputesIntOps(lhs : Computes[Int]) {
@@ -1123,24 +1285,34 @@ object Computes {
   def const[T : Type : Liftable](v : T) : Computes[T] =
     ComputesExpr(Nil, es => v.toExpr)
 
-  type ComputesToExpr[C <: Tuple] <: Tuple = C match {
-    case Unit => Unit
-    case Computes[t] *: tl => Expr[t] *: ComputesToExpr[tl]
-  }
+  type ComputesToExpr[C <: Computes[_]] = C match { case Computes[t] => Expr[t] }
 
-  def expr[T : Type, Param](param : Computes[Param], body : Expr[Param] => Expr[T]) : Computes[T] =
+  /*trait Computes2Expr[In <: Tuple, Out <: Tuple]
+
+  given C2E [T, Tl <: Tuple, Ttl <: Tuple] as Computes2Expr[Computes[T] *: Tl, Expr[T] *: Ttl] given (fTl : Computes2Expr[Tl,Ttl])
+  given C2EBase as Computes2Expr[Unit,Unit]*/
+
+  def expr[T : Type, Param](param : Computes[Param], body : given QuoteContext => Expr[Param] => Expr[T]) given implicits.Not[Param <:< Tuple] : Computes[T] =
     ComputesExpr(
       List(param),
       exprs => body(exprs.head.asInstanceOf[Expr[Param]]))
 
-  def expr[T : Type, Params <: Tuple](params : Params, body : ComputesToExpr[Params] => Expr[T]) : Computes[T] =
+  /*def expr[T : Type, Params <: Tuple, EParams <: Tuple](params : Params, body : EParams => Expr[T])
+      given Computes2Expr[Params,EParams] : Computes[T] =
     ComputesExpr(
       params.toArray.toList.asInstanceOf[List[Computes[_]]],
-      exprs => body(exprs.foldRight(() : Tuple)((hd, tl) => hd *: tl).asInstanceOf[ComputesToExpr[Params]]))
+      exprs => body(exprs.foldRight(() : Tuple)((hd, tl) => hd *: tl).asInstanceOf[Tuple.Map[Params,ComputesToExpr]]))*/
+
+  def expr[T : Type, Params <: Tuple](params : Params, body : Tuple.Map[Params,ComputesToExpr] => Expr[T]) : Computes[T] =
+    ComputesExpr(
+      params.toArray.toList.asInstanceOf[List[Computes[_]]],
+      exprs => body(exprs.foldRight(() : Tuple)((hd, tl) => hd *: tl).asInstanceOf[Tuple.Map[Params,ComputesToExpr]]))
 
 }
 
 import Computes._
+
+//val nil : Computes[Nil] = expr((), _ => '{ Nil })
 
 val add1 : Computes[Int|=>Int] =
   (i : Computes[Int]) => i+const(1)

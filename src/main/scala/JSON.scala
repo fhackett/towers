@@ -110,13 +110,13 @@ object JSON {
       yield expr(pairs, pairs => '{ JSONObject(${ pairs }.toMap) : JSONValue })
 
   val string : Computes[Grammar[Char,JSONValue]] =
-    stringLiteral.map((str : Computes[String]) => expr(str, str => '{ JSONString(${ str }) : JSONValue }))
+    stringLiteral.map((str : Computes[String]) => expr[JSONValue,String](str, str => '{ JSONString(${ str }) : JSONValue }))
 
   val `true` : Computes[Grammar[Char,JSONValue]] =
-    str("true").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
+    str("true").map((_ : Computes[Unit]) => expr[JSONValue,Unit,Unit]((), _ => '{ JSONTrue : JSONValue }))
 
   val `false` : Computes[Grammar[Char,JSONValue]] =
-    str("false").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
+    str("false").map((_ : Computes[Unit]) => expr[JSONValue,Unit,Unit]((), _ => '{ JSONTrue : JSONValue }))
 
   val value : Computes[Grammar[Char,JSONValue]] =
     choose(

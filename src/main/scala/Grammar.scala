@@ -21,7 +21,7 @@ class Cell[T](var t : T)
 object Grammar {
 
   implicit def InputSourceInst[E : Type] : Computes.FnInst[InputSource[E]] = new {
-    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) = '{ InputSource(${ pc }, ${ closure }) }
+    def apply(pc : Expr[Int], closure : Expr[Array[Any]]) given QuoteContext = '{ InputSource(${ pc }, ${ closure }) }
   }
 
   def parse[E : Type, T : Type](g : Computes[Grammar[E,T]], input : Computes[InputSource[E]]) : Computes[Option[T]] =
@@ -230,7 +230,7 @@ class AnyTermGrammar[E : Type] extends GrammarComputable[E,E] {
 class SuccessGrammar[E : Type, T : Type](var t : Computes[T]) extends GrammarComputable[E,T] {
   
   def toComputesSeq = Seq(t)
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(t : Computes[T]) => SuccessGrammar(t)
   }
 
@@ -243,7 +243,7 @@ class SuccessGrammar[E : Type, T : Type](var t : Computes[T]) extends GrammarCom
 class FailGrammar[E : Type, T : Type](var err : Computes[Error]) extends GrammarComputable[E,T] {
   
   def toComputesSeq = Seq(err)
-  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit opCtx : OpContext, keyCtx : KeyContext) = seq match {
+  def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
     case Seq(err : Computes[Error]) => FailGrammar(err)
   }
 

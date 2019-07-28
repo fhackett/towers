@@ -7,6 +7,6 @@ lazy val root = project
     name := "towers",
     version := "0.1.0",
 
-    scalaVersion := latestDotty,
+    scalaVersion := "0.17.0-RC1",
 )
 
