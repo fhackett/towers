@@ -355,7 +355,7 @@ object Computes {
     // object identity, ensuring that any issues of that kind never happen.
     def disambiguate[T](computes : Computes[T], inCtx : InCtx) : (Computes[T],OutCtx) = {
       if inCtx.substitutions.contains(computes.key) then {
-        inCtx.substitutions.contains(computes.key).asInstanceOf[(Computes[T],OutCtx)] match {
+        inCtx.substitutions(computes.key).asInstanceOf[(Computes[T],OutCtx)] match {
           case (c : ComputesIndirect[T], _) if c.binding == null =>
             (c, OutCtx(
               isRecursive=Set(c),
@@ -385,10 +385,14 @@ object Computes {
             
             val (result, outCtx) = computes match {
               case c : ComputesLazyRef[T] =>
-                impl(c.computes, innerCtx) // unconditionally erase lazy refs, they add nothing
-              case c : ComputesVar[T] =>
-                ??? // all vars should be substituted with new ones, so that even if they aren't globally unique per definition
-                    // originally, they will be after a rewrite
+                disambiguate(c.computes, innerCtx) // unconditionally erase lazy refs, they add nothing
+              case c : ComputesVar[T] => {
+                Predef.assert(innerCtx.known.contains(c.key))
+                (c, OutCtx(
+                  isRecursive=Set.empty,
+                  isReferenced=Set(c.key),
+                  substituted=Map.empty))
+              }
               case c : ComputesFunction[fn,r] => {
                 val pKeys = c.parameters.map(_.key)
                 val newParams = c.parameters.map({
@@ -396,7 +400,7 @@ object Computes {
                     ComputesVar[v]()(v.tType)
                 })
                 val newParamPairs = newParams zip newParams.map(_ => OutCtx.empty)
-                val (body, outCtx) = impl(c.body, innerCtx.copy(substitutions=innerCtx.substitutions ++ (pKeys zip newParamPairs)))
+                val (body, outCtx) = disambiguate(c.body, innerCtx.copy(substitutions=innerCtx.substitutions ++ (pKeys zip newParamPairs)))
                 type f <: _ ==> r
                 val result = ComputesFunction[f,r](
                   c.inst.asInstanceOf[FnInst[f]],
@@ -406,8 +410,8 @@ object Computes {
               }
               case c : ComputesBinding[v,T] => {
                 val newBind = ComputesVar[v]()(c.name.tType)
-                val (value, vOutCtx) = impl(c.value, innerCtx)
-                val (body, bOutCtx) = impl(
+                val (value, vOutCtx) = disambiguate(c.value, innerCtx)
+                val (body, bOutCtx) = disambiguate(
                   c.body,
                   innerCtx.copy(
                     substitutions=innerCtx.substitutions + ((c.name.key, (newBind, vOutCtx)))))
@@ -418,8 +422,8 @@ object Computes {
               }
               case c => {
                 val seq = computes.toComputesSeq
-                val (mapped, outCtxs) = seq.map(impl(_, inCtx)).unzip
-                val outCtx = outCtxs.reduce(_.merge(_))
+                val (mapped, outCtxs) = seq.map(disambiguate(_, inCtx)).unzip
+                val outCtx = outCtxs.foldLeft(OutCtx.empty)(_.merge(_))
 
                 (computes.likeFromSeq(mapped), outCtx)
               }
@@ -444,16 +448,25 @@ object Computes {
             }
           }
         }
+      } match {
+        case (res, out) => {
+          println(s"DUP ${computes.key} -> ${res.key}")
+          (res, out)
+        }
       }
     }
 
     def impl[T](computes : Computes[T], inCtx : InCtx) : (Computes[T],OutCtx) = {
+      //println(s"K ${computes.key} $computes $inCtx")
+      //println(s"REACH ${computes.key} $computes")
+      //println(inCtx)
+      //printComputes(computes)
 
       // this is the general case - it is referenced in two places so it is its own function
       def generalProc[T](computes : Computes[T], inCtx : InCtx) : (Computes[T],OutCtx) = {
         val seq = computes.toComputesSeq
         val (mapped, outCtxs) = seq.map(impl(_, inCtx)).unzip
-        val outCtx = outCtxs.reduce(_.merge(_))
+        val outCtx = outCtxs.foldLeft(OutCtx.empty)(_.merge(_))
 
         val beforeAction = computes.likeFromSeq(mapped)
 
@@ -482,6 +495,7 @@ object Computes {
       }
 
       if inCtx.substitutions.contains(computes.key) then {
+        //println("SUB ${computes.key} -> ${inCtx.substitutions(computes.key).key}")
         inCtx.substitutions(computes.key).asInstanceOf[(Computes[T],OutCtx)] match {
           case (c : ComputesIndirect[T], _) if c.binding == null =>
             (c, OutCtx(
@@ -522,28 +536,42 @@ object Computes {
             val innerCtx = inCtx.copy(substitutions=inCtx.substitutions + ((computes.key, (indirect, null))))
 
             def resolve[T](computes : Computes[T]) : Computes[T] = {
-              val c = innerCtx.substitutions.getOrElse(computes.key, computes).asInstanceOf[Computes[T]]
-              innerCtx.known.getOrElse(c.key, c).asInstanceOf[Computes[T]] match {
-                case cc : ComputesLazyRef[T] =>
-                  resolve(cc.computes)
-                case cc => cc
+              var c = if innerCtx.substitutions.contains(computes.key) then {
+                innerCtx.substitutions(computes.key)._1.asInstanceOf[Computes[T]]
+              } else {
+                computes
               }
+              while (innerCtx.known.contains(c.key)) {
+                c = innerCtx.known(c.key).asInstanceOf[Computes[T]]
+                c match {
+                  case cc : ComputesLazyRef[T] =>
+                    cc.computes
+                  case cc => cc
+                }
+              }
+              c
             }
             
             val (result, outCtx) = computes match {
               case c : ComputesLazyRef[T] =>
                 impl(c.computes, innerCtx) // unconditionally erase lazy refs, they add nothing
               case c : ComputesVar[T] =>
-                ??? // all vars should be substituted with new ones, so that even if they aren't globally unique per definition
-                    // originally, they will be after a rewrite
+                println(s"VAR ${c.key}")
+                Predef.assert(innerCtx.known.contains(c.key))
+                (c, OutCtx(
+                  isRecursive=Set.empty,
+                  isReferenced=Set(c.key),
+                  substituted=Map.empty))
               case c : ComputesApplication[fn,T] => {
                 resolve(c.function) match {
-                  case f : ComputesFunction[fn, T] => {
+                  case fNonDup : ComputesFunction[fn, T] => {
+                    println(s"INLINE ${c.function.key} -> ${fNonDup.key}")
+                    val (f, ndOutCtx) = disambiguate(fNonDup, innerCtx).asInstanceOf[(fNonDup.type,OutCtx)]
+
                     val pKeys = f.parameters.map(_.key)
-                    val (args, outCtxs) = c.arguments.map(impl(_, innerCtx)).unzip
 
                     // bind all the arguments so they process left to right
-                    val inlined = (f.parameters zip args).foldRight(f.body)({
+                    val inlined = (f.parameters zip c.arguments).foldRight(f.body)({
                       case ((name : ComputesVar[t], value), body) =>
                         // these two types should be the same, and this convinces the type system this is so
                         type VT = t
@@ -556,9 +584,7 @@ object Computes {
 
                     // process the result via the Binding case, allowing for things like arguments never being referenced
                     // and being accessed and inlined via InCtx.known, etc...
-                    val (result, outCtx) = impl(inlined, innerCtx)
-                    
-                    (result, outCtxs.reduce(_.merge(_)).merge(outCtx))
+                    impl(inlined, innerCtx)
                   }
                   case _ => {
                     generalProc(c, innerCtx) // if you can't inline, just give up and process c the generic way
@@ -584,6 +610,9 @@ object Computes {
               case c : ComputesBinding[v,T] => {
                 val newBind = ComputesVar[v]()(c.name.tType)
                 val (value, vOutCtx) = impl(c.value, innerCtx)
+                
+                println(s"KNOW ${newBind.key} (${c.name.key}) -> ${value.key} (${c.value.key}})")
+
                 val (body, bOutCtx) = impl(
                   c.body,
                   innerCtx.copy(
@@ -625,6 +654,8 @@ object Computes {
     }
 
     val (dis, _) = disambiguate(computes, InCtx.empty)
+    println("DIS")
+    printComputes(dis)
     val (result, _) = impl(dis, InCtx.empty)
     println("REWRITE")
     printComputes(result)
@@ -848,6 +879,7 @@ object Computes {
                 }
               }))
               blocks += block
+              println(s"BLOCKS? $block || $blocks")
             }
 
             // generate arguments right to left in order to accumulate closures from smallest to largest
@@ -878,10 +910,13 @@ object Computes {
             impl(c.function, fullClosure, (fn, pcMap, vMap, popData, pushData, pushPC) => '{
               // if we have a continuation then push block to return to, else we are a leaf call
               ${
-                //println(s"app $vMap ${c.key} ${closure.map(_.key)}")
+                println(s"app $vMap ${c.key} ${closure.map(_.key)} ${pcMap}")
                 if cont != null then {
                   // push locals left to right
-                  pushClosure(closure.map(v => vMap(v.key)), pushData, pushPC(pcMap(c.auxKey).toExpr))
+                  pushClosure(
+                    closure.map(v => vMap(v.key)),
+                    pushData,
+                    pushPC(pcMap(c.auxKey).toExpr))
                 } else {
                   '{}
                 }
@@ -954,7 +989,7 @@ object Computes {
             val body = impl(c.body, closure, cont)
             impl(c.value, closure, (value, pcMap, vMap, popData, pushData, pushPC) => 
               bindVars(List(c.name), List(value), vMap2 => {
-                //print("bind "); print(vMap ++ vMap2); println(c)
+                print("bind "); print(vMap ++ vMap2); println(c)
                 body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
               }))
           }
@@ -1078,61 +1113,75 @@ object Computes {
 
       blocks += ((computes.key, impl(computes, Nil, null)))
     }
+    println(s"BLOCKS! $blocks")
     blocks.toList
   }
 
   def printComputes[T](computes : Computes[T])(implicit keyCtx : KeyContext) : Unit = {
     
     val visitedSet = HashSet[ComputesKey]()
-    val names = HashMap[ComputesKey,String]()
-
-    var nextName = "a"
-    def freshName = {
-      val name = nextName
-      def makeNext(name : String) : String = if name.length == 0 then {
-        "a"
-      } else if name.head == 'z' then {
-        "a" ++ makeNext(name.tail)
-      } else {
-        String(Array((name.head + 1).asInstanceOf[Char])) ++ name.tail
-      }
-      nextName = makeNext(name)
-      name
-    }
 
     var indentation = 0
 
-    def impl[T](computes : Computes[T]) : Unit = {
+    def line(str : String) : Unit = {
       for(i <- 0 until indentation) {
         print("  ")
       }
+      println(str)
+    }
+
+    def impl[T](computes : Computes[T]) : Unit = {
       if computes != null then {
-        print(s"${computes.key}; ${computes.auxKey}; ${computes.auxVar.key}; ")
-        if names.contains(computes.key) then {
-          print("<>"); println(names(computes.key))
+        if visitedSet.contains(computes.key) then {
+          line(s"<> ${computes.key}")
         } else {
-          names(computes.key) = freshName
-          print(names(computes.key)); print(": ")
+          visitedSet += computes.key
           computes match {
             case c : ComputesFunction[_,_] => {
-              println(c.parameters.map(_.key))
+              line(s"${c.key}(${c.parameters.map(_.key)}){")
+              indentation += 1
+              impl(c.body)
+              indentation -= 1
+              line("}")
+            }
+            case c : ComputesVar[_] => {
+              line(s"${c.key}")
+            }
+            case c : ComputesBinding[_,_] => {
+              line(s"${c.name.key} = ")
+              impl(c.value)
+              line(";")
+              impl(c.body)
+            }
+            case c : ComputesApplication[_,_] => {
+              impl(c.function)
+              line("(")
+              indentation += 1
+              for(arg <- c.arguments) {
+                impl(arg)
+              }
+              indentation -= 1
+              line(")")
             }
             case c : ComputesLazyRef[T] => {
-              print(c); print(" :: "); println(c.computes)
+              print(s"${c.key} :: ")
+              impl(c.computes)
             }
             case c : ComputesIndirect[T] => {
-              print(c); println(" >>")
+              line(s"${c.key} => ")
               indentation += 1
               impl(c.binding)
               indentation -= 1
             }
-            case c => println(c)
+            case c => {
+              line(s"?? ${c.key} $c")
+              indentation += 1
+              for(part <- c.toComputesSeq) {
+                impl(part)
+              }
+              indentation -= 1
+            }
           }
-          indentation += 1
-          for(c <- computes.toComputesSeq) {
-            impl(c)
-          }
-          indentation -= 1
         }
       } else {
         println("NULL")
@@ -1176,6 +1225,7 @@ object Computes {
 
     val rootKey = inlinedComputes2.key
     val basicBlocks = getBasicBlocks(inlinedComputes2)
+    println(s"BASIC BLOCKS $basicBlocks")
 
     //println(blocks)
     val pcMap = basicBlocks.zipWithIndex.map((block, idx) => (block._1, idx)).toMap
