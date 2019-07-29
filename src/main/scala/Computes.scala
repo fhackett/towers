@@ -84,7 +84,7 @@ final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
 }
 
-final class ComputesApplication[FnType, Result : Type](val arguments : Seq[Computes[_]], val function : Computes[FnType]) extends Computes[Result] {
+final class ComputesApplication[FnType <: Computes.==>[_,Result], Result : Type](val arguments : Seq[Computes[_]], val function : Computes[FnType]) extends Computes[Result] {
   val auxVar = ComputesVar[Result]()
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
@@ -450,7 +450,7 @@ object Computes {
         }
       } match {
         case (res, out) => {
-          println(s"DUP ${computes.key} -> ${res.key}")
+          //println(s"DUP ${computes.key} -> ${res.key}")
           (res, out)
         }
       }
@@ -543,7 +543,7 @@ object Computes {
               }
               while (innerCtx.known.contains(c.key)) {
                 c = innerCtx.known(c.key).asInstanceOf[Computes[T]]
-                c match {
+                c = c match {
                   case cc : ComputesLazyRef[T] =>
                     cc.computes
                   case cc => cc
@@ -556,7 +556,7 @@ object Computes {
               case c : ComputesLazyRef[T] =>
                 impl(c.computes, innerCtx) // unconditionally erase lazy refs, they add nothing
               case c : ComputesVar[T] =>
-                println(s"VAR ${c.key}")
+                //println(s"VAR ${c.key}")
                 Predef.assert(innerCtx.known.contains(c.key))
                 (c, OutCtx(
                   isRecursive=Set.empty,
@@ -565,7 +565,7 @@ object Computes {
               case c : ComputesApplication[fn,T] => {
                 resolve(c.function) match {
                   case fNonDup : ComputesFunction[fn, T] => {
-                    println(s"INLINE ${c.function.key} -> ${fNonDup.key}")
+                    //println(s"INLINE ${c.function.key} -> ${fNonDup.key}")
                     val (f, ndOutCtx) = disambiguate(fNonDup, innerCtx).asInstanceOf[(fNonDup.type,OutCtx)]
 
                     val pKeys = f.parameters.map(_.key)
@@ -611,7 +611,7 @@ object Computes {
                 val newBind = ComputesVar[v]()(c.name.tType)
                 val (value, vOutCtx) = impl(c.value, innerCtx)
                 
-                println(s"KNOW ${newBind.key} (${c.name.key}) -> ${value.key} (${c.value.key}})")
+                //println(s"KNOW ${newBind.key} (${c.name.key}) -> ${value.key} (${c.value.key}})")
 
                 val (body, bOutCtx) = impl(
                   c.body,
@@ -654,11 +654,11 @@ object Computes {
     }
 
     val (dis, _) = disambiguate(computes, InCtx.empty)
-    println("DIS")
-    printComputes(dis)
+    //println("DIS")
+    //printComputes(dis)
     val (result, _) = impl(dis, InCtx.empty)
-    println("REWRITE")
-    printComputes(result)
+    //println("REWRITE")
+    //printComputes(result)
     result
   }
 
@@ -677,8 +677,12 @@ object Computes {
         }
     })
 
-  type BasicBlock = given QuoteContext => (Map[ComputesKey,Int],Map[ComputesKey,Expr[_]],Expr[Any],Expr[Any]=>Expr[Unit], Expr[Int]=>Expr[Unit]) => Expr[Unit]
-  type Continuation[T] = given QuoteContext => (Expr[T],Map[ComputesKey,Int],Map[ComputesKey,Expr[_]],Expr[Any],Expr[Any]=>Expr[Unit], Expr[Int]=>Expr[Unit])=>Expr[Unit]
+  abstract class BasicBlock {
+    def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit]
+  }
+  abstract class Continuation[T] {
+    def apply(value : Expr[T], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit]
+  }
 
   def getBasicBlocks[T](computes : Computes[T])(implicit keyCtx : KeyContext) : List[(ComputesKey,BasicBlock)] = {
 
@@ -783,21 +787,23 @@ object Computes {
         })
         var inClosure = closure
         val (_, result) = (seq zip resultClosures).foldRight((NoKey, after))((ss, acc) => (ss, acc) match {
-          case ((s, resultClosure), (next, after)) => {
+          case ((s : Computes[t], resultClosure), (next, after)) => {
             //println(s"rc ${s.key} ${s.auxKey} ${resultClosure.map(_.key)} ${closure.map(_.key)}")
             if next != NoKey then {
               inClosure = orderedSetMerge(inClosure, nodeClosures(next))
             }
             val fullClosure = orderedSetMerge(inClosure, resultClosure)
-            (s.key, impl(s, fullClosure, (v, pcMap, vMap, popData, pushData, pushPC) => {
-              if !singleUse then {
-                implicit val e1 = s.tType
-                '{
-                  val bind = ${ v }
-                  ${ after(pcMap, vMap + ((s.auxVar.key, '{ bind })), popData, pushData, pushPC) }
+            (s.key, impl(s, fullClosure, new Continuation[t] {
+              def apply(v : Expr[t], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
+                if !singleUse then {
+                  implicit val e1 = s.tType
+                  '{
+                    val bind = ${ v }
+                    ${ after(pcMap, vMap + ((s.auxVar.key, '{ bind })), popData, pushData, pushPC) }
+                  }
+                } else {
+                  after(pcMap, vMap + ((s.auxVar.key, v)), popData, pushData, pushPC)
                 }
-              } else {
-                after(pcMap, vMap + ((s.auxVar.key, v)), popData, pushData, pushPC)
               }
             }))
           }
@@ -818,66 +824,77 @@ object Computes {
                   visitedSet += c.binding.key
                   val body = impl(c.binding, closure, null)
                   val reverseClosure = nodeClosures(c.binding.key).reverse
-                  blocks += ((c.binding.key, (pcMap, vMap, popData, pushData, pushPC) => {
-                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
-                      //print("l clos "); print(vMap ++ vMap2); println(c)
-                      body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
-                    })
+                  blocks += ((c.binding.key, new BasicBlock {
+                    def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
+                      bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
+                        //print("l clos "); print(vMap ++ vMap2); println(c)
+                        body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
+                      })
+                    }
                   }))
                 }
                 if cont != null then {
-                  blocks += ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC) => {
-                    val reverseClosure = closure.reverse
-                    '{
-                      val arg = ${ popData }.asInstanceOf[T]
-                      ${
-                        bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
-                          cont('{ arg }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
-                        })
+                  blocks += ((c.auxKey, new BasicBlock {
+                    def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
+                      val reverseClosure = closure.reverse
+                      '{
+                        val arg = ${ popData }.asInstanceOf[T]
+                        ${
+                          bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
+                            cont('{ arg }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
+                          })
+                        }
                       }
                     }
                   }))
                 }
-                (pcMap, vMap, popData, pushData, pushPC) => '{
-                  ${
-                    //print("l pre "); print(vMap); println(c)
-                    if cont != null then {
-                      pushClosure(closure.map(v => vMap(v.key)), pushData, pushPC(pcMap(c.auxKey).toExpr))
-                    } else {
-                      '{}
+                new BasicBlock {
+                  def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                    ${
+                      //print("l pre "); print(vMap); println(c)
+                      if cont != null then {
+                        pushClosure(closure.map(v => vMap(v.key)), pushData, pushPC(pcMap(c.auxKey).toExpr))
+                      } else {
+                        '{}
+                      }
                     }
-                  }
-                  ${
-                    pushClosure(
-                      nodeClosures(c.binding.key).map(v => vMap(v.key)),
-                      pushData, pushPC(pcMap(c.binding.key).toExpr))
+                    ${
+                      pushClosure(
+                        nodeClosures(c.binding.key).map(v => vMap(v.key)),
+                        pushData, pushPC(pcMap(c.binding.key).toExpr))
+                    }
                   }
                 }
               }
             }
-          case c : ComputesVar[T] => {
-            (pcMap, vMap, popData, pushData, pushPC) => {
-              //println(s"v $vMap ${c.key}")
-              if cont == null then
-                pushData(vMap(c.key))
-              else
-                cont(vMap(c.key).asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC)
+          case c : ComputesVar[T] =>
+            new BasicBlock {
+              def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
+                println(s"VAR ${c.key} ${vMap}")
+                if cont == null then
+                  pushData(vMap(c.key))
+                else
+                  cont(vMap(c.key).asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC)
+              }
             }
-          }
-          case c : ComputesApplication[_,T] => {
+          case c : ComputesApplication[fnT,T] => {
             implicit val e1 = c.tType
             implicit val e2 = c.function.tType
             if cont != null then {
-              val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC) => '{
-                val ret = ${ popData }.asInstanceOf[T]
-                ${
-                  val reverseClosure = closure.reverse
-                  bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
-                    //print("app clos "); print(vMap ++ vMap2); println(c)
-                    cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
-                  })
-                }
-              }))
+              val block : (ComputesKey, BasicBlock) = (
+                c.auxKey,
+                new BasicBlock {
+                  def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                    val ret = ${ popData }.asInstanceOf[T]
+                    ${
+                      val reverseClosure = closure.reverse
+                      bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
+                        //print("app clos "); print(vMap ++ vMap2); println(c)
+                        cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
+                      })
+                    }
+                  }
+                })
               blocks += block
               println(s"BLOCKS? $block || $blocks")
             }
@@ -888,18 +905,24 @@ object Computes {
             c.arguments.foldRight(NoKey)((arg, nextKey) => {
               fullClosure = orderedSetMerge(fullClosure, if nextKey != NoKey then nodeClosures(nextKey) else Nil)
               val narg = nextArg
-              nextArg = impl(
-                arg,
-                fullClosure,
-                if nextKey != NoKey then {
-                  (argVal, pcMap, vMap, popData, pushData, pushPC) => '{
-                    ${
-                      //print("arg "); print(vMap); println(arg)
-                      pushData(argVal)
-                    }
-                    ${ narg(pcMap, vMap, popData, pushData, pushPC) }
-                  }
-                } else null)
+              arg match {
+                case a : Computes[t] => {
+                  nextArg = impl(
+                    a,
+                    fullClosure,
+                    if nextKey != NoKey then {
+                      new Continuation[t] {
+                        def apply(argVal : Expr[t], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                          ${
+                            //print("arg "); print(vMap); println(arg)
+                            pushData(argVal)
+                          }
+                          ${ narg(pcMap, vMap, popData, pushData, pushPC) }
+                        }
+                      }
+                    } else null)
+                }
+              }
               arg.key
             })
 
@@ -907,91 +930,105 @@ object Computes {
             if !c.arguments.isEmpty then {
               fullClosure = orderedSetMerge(fullClosure, nodeClosures(c.arguments.head.key))
             }
-            impl(c.function, fullClosure, (fn, pcMap, vMap, popData, pushData, pushPC) => '{
-              // if we have a continuation then push block to return to, else we are a leaf call
-              ${
-                println(s"app $vMap ${c.key} ${closure.map(_.key)} ${pcMap}")
-                if cont != null then {
-                  // push locals left to right
-                  pushClosure(
-                    closure.map(v => vMap(v.key)),
-                    pushData,
-                    pushPC(pcMap(c.auxKey).toExpr))
-                } else {
-                  '{}
+            impl(c.function, fullClosure,
+              new Continuation[fnT] {
+                def apply(fn : Expr[fnT], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                  // if we have a continuation then push block to return to, else we are a leaf call
+                  ${
+                    println(s"app $vMap ${c.key} ${closure.map(_.key)} ${pcMap}")
+                    if cont != null then {
+                      // push locals left to right
+                      pushClosure(
+                        closure.map(v => vMap(v.key)),
+                        pushData,
+                        pushPC(pcMap(c.auxKey).toExpr))
+                    } else {
+                      '{}
+                    }
+                  }
+                  val fnV = ${ fn }
+                  ${ pushPC('{ fnV.pc }) }
+                  ${ pushData('{ fnV.closure }) }
+                  ${
+                    if !c.arguments.isEmpty then
+                      nextArg(pcMap, vMap, popData, pushData, pushPC)
+                    else
+                      '{}
+                  }
                 }
-              }
-              val fnV = ${ fn }.asInstanceOf[==>[_,_]]
-              ${ pushPC('{ fnV.pc }) }
-              ${ pushData('{ fnV.closure }) }
-              ${
-                if !c.arguments.isEmpty then
-                  nextArg(pcMap, vMap, popData, pushData, pushPC)
-                else
-                  '{}
-              }
-            })
+              })
           }
           case c : ComputesFunction[fnType,_] => {
             // lazily generate function body (incl. stack pop and closure extraction)
             if !visitedSet(c.key) then {
               visitedSet += c.key
               val body = impl(c.body, List.empty, null)
-              val block : (ComputesKey,BasicBlock) = ((c.body.key, (pcMap, vMap, popData, pushData, pushPC) => {
-                val reverseParams = c.parameters.reverse
-                val fClosure = nodeClosures(c.key)
-                bindVars(reverseParams.toList, reverseParams.map(p => '{ ${ popData }.asInstanceOf[${ p.tType }] }).toList, vMap2 => '{
-                  val closureVal = ${ popData }.asInstanceOf[Array[Any]]
-                  ${
-                    //print("fn args "); print(vMap ++ vMap2); println(c)
-                    bindVars(
-                      fClosure,
-                      for((v, i) <- fClosure.zipWithIndex)
-                        yield '{ closureVal(${ i.toExpr }).asInstanceOf[${ v.tType }] },
-                      vMap3 => {
-                        //print("fn clos "); print(vMap3); println(c)
-                        body(pcMap, vMap ++ vMap2 ++ vMap3, popData, pushData, pushPC)
+              val block : (ComputesKey,BasicBlock) =
+                (
+                  c.body.key,
+                  new BasicBlock {
+                    def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
+                      val reverseParams = c.parameters.reverse
+                      val fClosure = nodeClosures(c.key)
+                      bindVars(reverseParams.toList, reverseParams.map(p => '{ ${ popData }.asInstanceOf[${ p.tType }] }).toList, vMap2 => '{
+                        val closureVal = ${ popData }.asInstanceOf[Array[Any]]
+                        ${
+                          //print("fn args "); print(vMap ++ vMap2); println(c)
+                          bindVars(
+                            fClosure,
+                            for((v, i) <- fClosure.zipWithIndex)
+                              yield '{ closureVal(${ i.toExpr }).asInstanceOf[${ v.tType }] },
+                            vMap3 => {
+                              //print("fn clos "); print(vMap3); println(c)
+                              body(pcMap, vMap ++ vMap2 ++ vMap3, popData, pushData, pushPC)
+                            })
+                        }
                       })
-                  }
-                })
-              }))
+                    }
+                  })
               blocks += block
             }
-            (pcMap, vMap, popData, pushData, pushPC) => {
-              implicit val e1 = c.tType
-              println(s"CLOS ${c.key} ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
-              val refs = nodeClosures(c.key).map(v => vMap(v.key))
-              val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then
-                '{
-                  val clos = new Array[Any](${ refs.length.toExpr })
-                  ${
-                    refs.zipWithIndex.foldLeft('{})((acc, tp) => tp match {
-                      case (ref, i) => '{ clos(${ i.toExpr }) = ${ ref }; ${ acc } }
-                    })
+
+            new BasicBlock {
+              def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = {
+                implicit val e1 = c.tType
+                println(s"CLOS ${c.key} ${nodeClosures(c.key).map(_.key)} VV ${vMap}")
+                val refs = nodeClosures(c.key).map(v => vMap(v.key))
+                val closureExpr : Expr[Array[Any]] = if !refs.isEmpty then
+                  '{
+                    val clos = new Array[Any](${ refs.length.toExpr })
+                    ${
+                      refs.zipWithIndex.foldLeft('{})((acc, tp) => tp match {
+                        case (ref, i) => '{ clos(${ i.toExpr }) = ${ ref }; ${ acc } }
+                      })
+                    }
+                    clos
                   }
-                  clos
-                }
-              else
-                '{ null }
-              '{
-                val fn = ${ c.inst(pcMap(c.body.key).toExpr, closureExpr) }
-                ${
-                  //print("ffn "); print(vMap); println(c)
-                  if cont != null then
-                    cont('{ fn }.asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC)
-                  else
-                    pushData('{ fn })
+                else
+                  '{ null }
+                '{
+                  val fn = ${ c.inst(pcMap(c.body.key).toExpr, closureExpr) }
+                  ${
+                    //print("ffn "); print(vMap); println(c)
+                    if cont != null then
+                      cont('{ fn }.asInstanceOf[Expr[T]], pcMap, vMap, popData, pushData, pushPC)
+                    else
+                      pushData('{ fn })
+                  }
                 }
               }
             }
           }
-          case c : ComputesBinding[_,T] => {
+          case c : ComputesBinding[v,T] => {
             val body = impl(c.body, closure, cont)
-            impl(c.value, closure, (value, pcMap, vMap, popData, pushData, pushPC) => 
-              bindVars(List(c.name), List(value), vMap2 => {
-                print("bind "); print(vMap ++ vMap2); println(c)
-                body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
-              }))
+            val bodyClosure = orderedSetMerge(closure, nodeClosures(c.body.key))
+            impl(c.value, bodyClosure, new Continuation[v] {
+              def apply(value : Expr[v], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] =
+                bindVars(List(c.name), List(value), vMap2 => {
+                  println(s"bind ${vMap ++ vMap2} $c ${bodyClosure.map(_.key)}")
+                  body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
+                })
+            })
           }
           case c : ComputesSwitch[_,T] => {
             def thunk[AT,T](c : ComputesSwitch[AT,T], cont : Continuation[T]) : BasicBlock = {
@@ -999,16 +1036,21 @@ object Computes {
               implicit val e2 = c.argument.tType
 
               if cont != null then {
-                val block : (ComputesKey, BasicBlock) = ((c.auxKey, (pcMap, vMap, popData, pushData, pushPC) => '{
-                  val ret = ${ popData }.asInstanceOf[T]
-                  ${
-                    val reverseClosure = closure.reverse
-                    bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
-                      //print("switch clos "); print(vMap ++ vMap2); println(c)
-                      cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
+                val block : (ComputesKey, BasicBlock) =
+                  (
+                    c.auxKey,
+                    new BasicBlock{
+                      def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                        val ret = ${ popData }.asInstanceOf[T]
+                        ${
+                          val reverseClosure = closure.reverse
+                          bindVars(reverseClosure, reverseClosure.map(v => '{ ${ popData }.asInstanceOf[${ v.tType }] }), vMap2 => {
+                            //print("switch clos "); print(vMap ++ vMap2); println(c)
+                            cont('{ ret }, pcMap, vMap ++ vMap2, popData, pushData, pushPC)
+                          })
+                        }
+                      }
                     })
-                  }
-                }))
                 blocks += block
               }
 
@@ -1019,69 +1061,71 @@ object Computes {
               // (which will fail is enough indirections happen)
               val bodyClosure = c.cases.map(a => nodeClosures(a._2.key)).foldLeft(closure)(orderedSetMerge)
               bindSequence(c.argument :: c.cases.map(_._1).toList, bodyClosure, true,
-                (pcMap, vMap, popData, pushData, pushPC) => '{
-                  ${
-                    if cont != null then '{
-                      ${ pushPC(pcMap(c.auxKey).toExpr) }
-                      ${
-                        closure.foldLeft('{})((acc, v) => '{
-                          ${ acc }
-                          ${ pushData(vMap(v.key)) }
-                        })
+                new BasicBlock {
+                  def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                    ${
+                      if cont != null then '{
+                        ${ pushPC(pcMap(c.auxKey).toExpr) }
+                        ${
+                          closure.foldLeft('{})((acc, v) => '{
+                            ${ acc }
+                            ${ pushData(vMap(v.key)) }
+                          })
+                        }
+                      } else {
+                        '{}
                       }
-                    } else {
-                      '{}
                     }
-                  }
-                  ${
-                    val qctx = implicitly[QuoteContext]
-                    import qctx.tasty._
+                    ${
+                      val qctx = implicitly[QuoteContext]
+                      import qctx.tasty._
 
-                    val bloodSacrifice = '{
-                      ${ vMap(c.argument.auxVar.key).asInstanceOf[Expr[AT]] } match {
-                        case _ => ()
-                      }
-                    }/*
-                    val scrutinee = bloodSacrifice.unseal match {
-                      case IsInlined(inl) => inl.body match {
-                        case IsMatch(m) => m.scrutinee
-                      }
-                    }*/
-                    Match(
-                      vMap(c.argument.auxVar.key).unseal,
-                      (for((v,r) <- c.cases)
-                        yield {
-                          val bloodSacrifice = '{
-                            ${ vMap(c.argument.auxVar.key) } match {
-                              case x if x == ${ vMap(v.auxVar.key) } =>
-                                ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC) }
-                            }
-                          }
-                          // more hack because I can't generate var bindings myself
-                          bloodSacrifice.unseal match {
-                            case IsInlined(inl) => inl.body match {
-                              case IsMatch(m) => m.cases.head
-                            }
-                          }
-                          /*CaseDef(
-                            Pattern.Value(vMap(v.auxVar.key).unseal),
-                            None,
-                            outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection).unseal)*/
-                        }).toList
-                      ++ default.map(d =>
-                          List({
-                            // hack: steal default branch from donor match expression
+                      val bloodSacrifice = '{
+                        ${ vMap(c.argument.auxVar.key).asInstanceOf[Expr[AT]] } match {
+                          case _ => ()
+                        }
+                      }/*
+                      val scrutinee = bloodSacrifice.unseal match {
+                        case IsInlined(inl) => inl.body match {
+                          case IsMatch(m) => m.scrutinee
+                        }
+                      }*/
+                      Match(
+                        vMap(c.argument.auxVar.key).unseal,
+                        (for((v,r) <- c.cases)
+                          yield {
                             val bloodSacrifice = '{
                               ${ vMap(c.argument.auxVar.key) } match {
-                                case _ => ${ d(pcMap, vMap, popData, pushData, pushPC) }
+                                case x if x == ${ vMap(v.auxVar.key) } =>
+                                  ${ outputs(r.key)(pcMap, vMap, popData, pushData, pushPC) }
                               }
                             }
+                            // more hack because I can't generate var bindings myself
                             bloodSacrifice.unseal match {
                               case IsInlined(inl) => inl.body match {
                                 case IsMatch(m) => m.cases.head
                               }
                             }
-                          })).getOrElse(Nil)).seal.cast[Unit]
+                            /*CaseDef(
+                              Pattern.Value(vMap(v.auxVar.key).unseal),
+                              None,
+                              outputs(r.key)(pcMap, vMap, popData, pushData, pushPC, reflection).unseal)*/
+                          }).toList
+                        ++ default.map(d =>
+                            List({
+                              // hack: steal default branch from donor match expression
+                              val bloodSacrifice = '{
+                                ${ vMap(c.argument.auxVar.key) } match {
+                                  case _ => ${ d(pcMap, vMap, popData, pushData, pushPC) }
+                                }
+                              }
+                              bloodSacrifice.unseal match {
+                                case IsInlined(inl) => inl.body match {
+                                  case IsMatch(m) => m.cases.head
+                                }
+                              }
+                            })).getOrElse(Nil)).seal.cast[Unit]
+                    }
                   }
                 })
             }
@@ -1091,14 +1135,16 @@ object Computes {
             implicit val e1 = c.tType
 
             bindSequence(c.parameters.toList, closure, false,
-              (pcMap, vMap, popData, pushData, pushPC) => '{
-                val result = ${ c.exprFn(c.parameters.map(p => vMap(p.auxVar.key))) }
-                //println(s"result $result")
-                ${
-                  if cont != null then {
-                    cont('{ result }, pcMap, vMap, popData, pushData, pushPC)
-                  } else {
-                    pushData('{ result })
+              new BasicBlock {
+                def apply(pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
+                  val result = ${ c.exprFn(c.parameters.map(p => vMap(p.auxVar.key))) }
+                  //println(s"result $result")
+                  ${
+                    if cont != null then {
+                      cont('{ result }, pcMap, vMap, popData, pushData, pushPC)
+                    } else {
+                      pushData('{ result })
+                    }
                   }
                 }
               })
