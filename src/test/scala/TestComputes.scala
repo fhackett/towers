@@ -4,7 +4,7 @@ import towers.computes._
 
 object TestComputes extends App {
 
-  Predef.assert(doAdd1(2) == 3)
+  /*Predef.assert(doAdd1(2) == 3)
 
   Predef.assert(doAdd2(2) == 4)
 
@@ -15,6 +15,6 @@ object TestComputes extends App {
 
   println(doUnimapAdd1(List(1,2,3,4)))
 
-  println(doUnimap2Add1(List(1,2,3,4)))
+  println(doUnimap2Add1(List(1,2,3,4)))*/
 }
 
