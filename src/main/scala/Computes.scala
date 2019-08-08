@@ -361,23 +361,30 @@ object Computes {
               isRecursive=Set(c),
               isReferenced=Set.empty,
               substituted=Map.empty))
+          case (c : ComputesVar[T], _) =>
+            (c, OutCtx(
+              isRecursive=Set.empty,
+              isReferenced=Set(c.key),
+              substituted=Map.empty)) // this is a leaf node, so outCtx must have been empty
           case (c, outCtx) =>
             (c, outCtx.copy(substituted=outCtx.substituted + ((computes.key, (c, outCtx)))))
         }
       } else {
         computes match {
           case c : ComputesIndirect[T] => {
-            Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
-            val newInd = ComputesIndirect[T](null)(c.tType)
-            val oldBinding = c.binding
-            // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
-            c.binding = null
-            
-            val (newBind, outCtx) = disambiguate(oldBinding, inCtx.copy(substitutions=inCtx.substitutions + ((c.key, (newInd, null)))))
-            newInd.binding = newBind
-            c.binding = oldBinding
+            if c.binding != null then {
+              Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
+              val newInd = ComputesIndirect[T](null)(c.tType)
+              val oldBinding = c.binding
+              // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
+              c.binding = null
+              
+              val (newBind, outCtx) = disambiguate(oldBinding, inCtx.copy(substitutions=inCtx.substitutions + ((c.key, (newInd, null)))))
+              newInd.binding = newBind
+              c.binding = oldBinding
 
-            (newInd, outCtx.copy(substituted=outCtx.substituted + ((c.key, (newInd, outCtx)))))
+              (newInd, outCtx.copy(substituted=outCtx.substituted + ((c.key, (newInd, outCtx)))))
+            }
           }
           case _ => {
             val indirect = ComputesIndirect[T](null)(computes.tType)
@@ -935,7 +942,7 @@ object Computes {
                 def apply(fn : Expr[fnT], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] = '{
                   // if we have a continuation then push block to return to, else we are a leaf call
                   ${
-                    println(s"app $vMap ${c.key} ${closure.map(_.key)} ${pcMap}")
+                    println(s"app $vMap ${c.key} ${closure.map(_.key)}")
                     if cont != null then {
                       // push locals left to right
                       pushClosure(
@@ -1201,7 +1208,7 @@ object Computes {
             }
             case c : ComputesApplication[_,_] => {
               impl(c.function)
-              line("(")
+              line(s"( [[${c.key}]]")
               indentation += 1
               for(arg <- c.arguments) {
                 impl(arg)

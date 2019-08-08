@@ -4,7 +4,7 @@ import towers.grammar.Test
 
 object TestGrammar extends App {
 
-  Predef.assert(Test.matchEOF("") == Some(()))
+  //Predef.assert(Test.matchEOF("") == Some(()))
   //Predef.assert(Test.matchEOF("A") == None)
 
   //Predef.assert(Test.matchAs("") == Some(Seq.empty))
