@@ -317,20 +317,20 @@ object Computes {
       // things that should be substituted with a known value (and OutCtx) rather than reprocessed
       val substitutions : Map[ComputesKey,(Computes[_],OutCtx)],
       val known : Map[ComputesKey,Computes[_]],
-      val touched : Map[ComputesKey,OutCtx]
+      val touched : Set[ComputesKey]
     )
 
     object InCtx {
       def empty = InCtx(
         substitutions=Map.empty,
         known=Map.empty,
-        touched=Map.empty)
+        touched=Set.empty)
     }
 
     final case class OutCtx(
       val isRecursive : Set[Computes[_]],
       val isReferenced : Set[ComputesKey],
-      val touched : Map[ComputesKey,OutCtx]
+      val touched : Set[ComputesKey]
     ) {
       def merge(other : OutCtx) : OutCtx =
         OutCtx(
@@ -344,11 +344,11 @@ object Computes {
         OutCtx(
           isRecursive=Set.empty,
           isReferenced=Set.empty,
-          touched=Map.empty)
+          touched=Set.empty)
     }
 
-    def injectIndirects[T](computes : Computes[T], indirects : Map[ComputesKey,ComputesIndirect[_]], touched : Map[ComputesKey,OutCtx]) : (Computes[T], Set[Computes[_]]) =
-      if touched.contains(computes.key) then {
+    def injectIndirects[T](computes : Computes[T], indirects : Map[ComputesKey,ComputesIndirect[_]], touched : Set[ComputesKey]) : (Computes[T], Set[Computes[_]]) =
+      if touched(computes.key) then {
         // if already processed, do nothing and just forward it back
         // invariant: either this is a vanilla tree so no indirects are processed at all, or this is after a rewrite where only new cycles may
         // be discovered; old cycles will be touched
@@ -431,10 +431,7 @@ object Computes {
         println(s"$k ${v.key} $oCtx")
       }
       println(inCtx.known)
-      println("TOUCHED:")
-      for((k,oCtx) <- inCtx.touched) {
-        println(s"$k $oCtx")
-      }
+      println(s"TOUCHED: ${inCtx.touched}")
       printComputes(computes)
 
       // this is the general case - it is referenced in two places so it is its own function
@@ -456,7 +453,9 @@ object Computes {
             // we've already seen before. This should specifically recurse over only new nodes.
             val inCtx2 = inCtx.copy(touched=inCtx.touched ++ outCtx.touched)
             val (fWithRedirects, _) = injectIndirects(f, Map.empty, inCtx2.touched)
-            impl(fWithRedirects, inCtx2)
+            val (result, nestedOutCtx) = impl(fWithRedirects, inCtx2)
+            (result, nestedOutCtx.copy(
+              touched=nestedOutCtx.touched ++ outCtx.touched))
           }
           case None => (beforeAction, outCtx)
         }
@@ -465,29 +464,27 @@ object Computes {
       // TODO: initial pass to erase LazyRefs and maybe replace with indirects, because not having indirects before you start causes
       // unsound inlining over recurrences (ouch!)
 
-      if inCtx.touched.contains(computes.key) then {
+      if inCtx.touched(computes.key) then {
         // if already processed, do nothing and just forward it back
-        // (with computes added back into the touched set, since some cases with substitutions can't do that initially)
-        val outCtx = inCtx.touched(computes.key)
-        val newTouched = {
-          val withIn = outCtx.touched ++ inCtx.touched
-          withIn + ((computes.key, outCtx.copy(touched=withIn)))
-        }
-        println(s"TOUCHED ${computes.key}")
-        (computes, outCtx.copy(touched=newTouched))
+        println(s"TOUCHED! ${computes.key}")
+        (computes, OutCtx(
+          isRecursive=Set.empty,
+          isReferenced=Set.empty,
+          touched=Set.empty))
       } else if inCtx.substitutions.contains(computes.key) then {
         //println("SUB ${computes.key} -> ${inCtx.substitutions(computes.key).key}")
         inCtx.substitutions(computes.key).asInstanceOf[(Computes[T],OutCtx)] match {
-          case (c : ComputesIndirect[T], outCtx) if c.binding == null =>
+          case (c : ComputesIndirect[T], outCtx) =>
             Predef.assert(outCtx == null)
+            Predef.assert(c.binding == null)
             // ignoring outCtx here will only matter if a var is referenced above its own declaration
             // which is wrong anyway, and can only happen with unsound mutually referential ASTs
             (c, OutCtx(
               isRecursive=Set(c),
               isReferenced=Set.empty,
-              touched=inCtx.touched))
+              touched=Set(c.key)))
           case (c, outCtx) =>
-            (c, outCtx.copy(touched=(outCtx.touched ++ inCtx.touched) + ((c.key, outCtx))))
+            (c, outCtx)
         }
       } else {
         computes match {
@@ -506,21 +503,19 @@ object Computes {
             if !outCtx.isRecursive(c) then {
               (newBind, outCtx)
             } else {
-              (newInd, outCtx.copy(touched=outCtx.touched + ((newInd.key, outCtx))))
+              (newInd, outCtx.copy(touched=outCtx.touched + newInd.key))
             }
           }
           case _ => {
-            val indirect = ComputesIndirect[T](null)(computes.tType)
-            val innerCtx = inCtx.copy(substitutions=inCtx.substitutions + ((computes.key, (indirect, null))))
 
             def resolve[T](computes : Computes[T]) : Computes[T] = {
-              var c = if innerCtx.substitutions.contains(computes.key) then {
-                innerCtx.substitutions(computes.key)._1.asInstanceOf[Computes[T]]
+              var c = if inCtx.substitutions.contains(computes.key) then {
+                inCtx.substitutions(computes.key)._1.asInstanceOf[Computes[T]]
               } else {
                 computes
               }
-              while (innerCtx.known.contains(c.key)) {
-                c = innerCtx.known(c.key).asInstanceOf[Computes[T]]
+              while (inCtx.known.contains(c.key)) {
+                c = inCtx.known(c.key).asInstanceOf[Computes[T]]
               }
               c
             }
@@ -529,13 +524,13 @@ object Computes {
               case c : ComputesLazyRef[T] =>
                 ??? // unreachable, should be replaced with an indirect by injectIndirects
               case c : ComputesVar[T] =>
-                println(s"UNREACHABLE? ${c.key}")
-                ??? // unreachable, must be either in substitutions or "touched"
-                /*Predef.assert(innerCtx.known.contains(c.key))
+                // only reached when re-processing a subtree that has already been processed,
+                // but part of it needs reprocessing due to a rewrite (i.e the body of an already
+                // processed function literal)
                 (c, OutCtx(
                   isRecursive=Set.empty,
                   isReferenced=Set(c.key),
-                  touched=Map))*/
+                  touched=Set(c.key)))
               case c : ComputesApplication[fn,T] => {
                 resolve(c.function) match {
                   case f : ComputesFunction[fn, T] => {
@@ -557,10 +552,10 @@ object Computes {
 
                     // process the result via the Binding case, allowing for things like arguments never being referenced
                     // and being accessed and inlined via InCtx.known, etc...
-                    impl(inlined, innerCtx)
+                    impl(inlined, inCtx)
                   }
                   case _ => {
-                    generalProc(c, innerCtx) // if you can't inline, just give up and process c the generic way
+                    generalProc(c, inCtx) // if you can't inline, just give up and process c the generic way
                   }
                 }
               }
@@ -574,9 +569,9 @@ object Computes {
                     OutCtx(
                       isRecursive=Set.empty,
                       isReferenced=Set(v.key),
-                      touched=Map.empty)))
+                      touched=Set(v.key))))
 
-                val (body, outCtx) = impl(c.body, innerCtx.copy(substitutions=innerCtx.substitutions ++ (pKeys zip newParamPairs)))
+                val (body, outCtx) = impl(c.body, inCtx.copy(substitutions=inCtx.substitutions ++ (pKeys zip newParamPairs)))
                 type f <: _ ==> r
                 val result = ComputesFunction[f,r](
                   c.inst.asInstanceOf[FnInst[f]],
@@ -586,18 +581,18 @@ object Computes {
               }
               case c : ComputesBinding[v,T] => {
                 val newBind = ComputesVar[v]()(c.name.tType)
-                val (value, vOutCtx) = impl(c.value, innerCtx)
+                val (value, vOutCtx) = impl(c.value, inCtx)
                 
                 //println(s"KNOW ${newBind.key} (${c.name.key}) -> ${value.key} (${c.value.key}})")
 
                 val (body, bOutCtx) = impl(
                   c.body,
-                  innerCtx.copy(
-                    substitutions=innerCtx.substitutions + ((c.name.key, (newBind, OutCtx(
+                  inCtx.copy(
+                    substitutions=inCtx.substitutions + ((c.name.key, (newBind, OutCtx(
                       isRecursive=Set.empty,
                       isReferenced=Set(newBind.key),
-                      touched=Map.empty)))),
-                    known=innerCtx.known + ((newBind.key, value))))
+                      touched=Set(newBind.key))))),
+                    known=inCtx.known + ((newBind.key, value))))
 
                 // if the body contains no references to newBind, it means value is not needed and we can completely elide this binding
                 if bOutCtx.isReferenced(newBind.key) then {
@@ -608,30 +603,17 @@ object Computes {
                   (body, bOutCtx)
                 }
               }
-              case c => generalProc(c, innerCtx) 
+              case c => generalProc(c, inCtx) 
             }
 
-            // if back-references were constructed with indirect, this must be the "top" of a cycle so inject indirect into the program
-            // otherwise we discard indirect and never speak of it again (since it is neither referenced not needed)
-            if outCtx.isRecursive(indirect) then { 
-              indirect.binding = result
-              val outCtx2 = outCtx.copy(touched=outCtx.touched + ((result.key, outCtx)))
-              (
-                indirect,
-                outCtx2.copy(
-                  touched=outCtx2.touched + ((indirect.key, outCtx2))))
-            } else {
-              (
-                result,
-                outCtx.copy(
-                  touched=outCtx.touched + ((result.key, outCtx))))
-            }
+            // add the result to touched
+            (result, outCtx.copy(touched=outCtx.touched + result.key))
           }
         }
       }
     }
 
-    val (withIndirects, _) = injectIndirects(computes, Map.empty, Map.empty)
+    val (withIndirects, _) = injectIndirects(computes, Map.empty, Set.empty)
     println("WITHINDIRECTS")
     printComputes(withIndirects)
     val (result, _) = impl(withIndirects, InCtx.empty)
@@ -1003,7 +985,7 @@ object Computes {
             impl(c.value, bodyClosure, new Continuation[v] {
               def apply(value : Expr[v], pcMap : Map[ComputesKey,Int], vMap : Map[ComputesKey,Expr[_]], popData : Expr[Any], pushData : Expr[Any]=>Expr[Unit], pushPC : Expr[Int]=>Expr[Unit]) given QuoteContext : Expr[Unit] =
                 bindVars(List(c.name), List(value), vMap2 => {
-                  println(s"bind ${vMap ++ vMap2} $c ${bodyClosure.map(_.key)}")
+                  println(s"bind ${c.key} ${vMap ++ vMap2} ${bodyClosure.map(_.key)}")
                   body(pcMap, vMap ++ vMap2, popData, pushData, pushPC)
                 })
             })
@@ -1172,10 +1154,13 @@ object Computes {
               line(s"${c.key}")
             }
             case c : ComputesBinding[_,_] => {
-              line(s"${c.name.key} = ")
+              line(s"${c.name.key} = [[${c.key}]] ")
+              indentation += 1
               impl(c.value)
-              line(";")
+              indentation -= 1
+              line("; {")
               impl(c.body)
+              line("}")
             }
             case c : ComputesApplication[_,_] => {
               impl(c.function)
