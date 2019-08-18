@@ -172,6 +172,7 @@ object Grammar {
 import Grammar._
 
 abstract class GrammarComputable[E : Type, T : Type] given QuoteContext extends Computable[Grammar[E,T]] {
+  import Computes._
 
 }
 

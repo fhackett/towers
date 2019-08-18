@@ -55,9 +55,9 @@ final class ComputesVar[T : Type]() given QuoteContext extends Computes[T] {
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
 }
 
-final class ComputesIndirect[T : Type](var binding : Computes[T]) given QuoteContext extends Computes[T] {
-  val tType = implicitly[Type[T]]
-  val auxVar = ComputesVar[T]()
+final class ComputesIndirect[T](var binding : Computes[T]) given QuoteContext extends Computes[T] {
+  def tType = binding.tType
+  def auxVar = binding.auxVar
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
   def toComputesSeq =
@@ -368,6 +368,7 @@ object Computes {
         // be discovered; old cycles will be touched
         (computes, Set.empty)
       } else if indirects.contains(computes.key) then {
+        println(s"I ${computes.key} $computes")
         val indirect = indirects(computes.key).asInstanceOf[ComputesIndirect[T]]
         Predef.assert(indirect.binding == null)
         (indirect, Set(indirect))
@@ -376,7 +377,7 @@ object Computes {
         computes match {
           case c : ComputesIndirect[T] => {
             Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
-            val newInd = ComputesIndirect[T](null) given (c.tType, the[QuoteContext])
+            val newInd = ComputesIndirect[T](null)
             val oldBinding = c.binding
             // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
             c.binding = null
@@ -392,37 +393,13 @@ object Computes {
               (newInd, isRecursive)
             }
           }
-          case c : ComputesLazyRef[T] => {
-            // this is almost the same as the general case below, but we can't use c.tType so we special case it
-            // (we also use the same indirect for all the lazy refs we find, since we don't know which lazy ref will come back)
-            val (inner, innerTType, lazies) = {
-              @scala.annotation.tailrec
-              def findRealInner[T](computes : Computes[T], lazies : List[ComputesLazyRef[T]]) : (Computes[T], Type[T], List[ComputesLazyRef[T]]) =
-                computes match {
-                  case c : ComputesLazyRef[T] =>
-                    findRealInner(c.computes, c :: lazies)
-                  case c =>
-                    (c, c.tType, lazies)
-                }
-
-              findRealInner(c.computes, List(c))
-            }
-            val indirect = ComputesIndirect[T](null) given (innerTType, the[QuoteContext])
-            val innerIndirects = indirects ++ lazies.map(l => (l.key, indirect))
-
-            val (result, isRecursive) = injectIndirects(inner, innerIndirects, touched)
-            if isRecursive(indirect) then {
-              indirect.binding = result
-              (indirect, isRecursive)
-            } else {
-              (result, isRecursive)
-            }
-          }
           case _ => {
-            val indirect = ComputesIndirect[T](null) given (computes.tType, the[QuoteContext])
+            val indirect = ComputesIndirect[T](null)
             val innerIndirects = indirects + ((computes.key, indirect))
             
             val (result, isRecursive) = computes match {
+              case c : ComputesLazyRef[T] =>
+                injectIndirects(c.computes, innerIndirects, touched)
               case c : ComputesVar[T] =>
                 (c, Set.empty : Set[Computes[_]])
               case c : ComputesFunction[fn,r] => {
@@ -451,7 +428,7 @@ object Computes {
             }
 
             // if back-references were constructed with indirect, this must be the "top" of a cycle so inject indirect into the program
-            // otherwise we discard indirect and never speak of it again (since it is neither referenced not needed)
+            // otherwise we discard indirect and never speak of it again (since it is neither referenced nor needed)
             if isRecursive(indirect) then { 
               indirect.binding = result
               (indirect, isRecursive)
@@ -529,7 +506,7 @@ object Computes {
         computes match {
           case c : ComputesIndirect[T] => {
             Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
-            val newInd = ComputesIndirect[T](null) given (c.tType, the[QuoteContext])
+            val newInd = ComputesIndirect[T](null)
             val oldBinding = c.binding
             // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
             c.binding = null
@@ -1069,11 +1046,12 @@ object Computes {
               }
             })
           }
-          val fn = c.inst(getPC(c.key).toExpr, blockGen.byName(closureTmp))
+          val fnTmp = ComputesVar[T]()
+          blockGen.bind(fnTmp, c.inst(getPC(c.key).toExpr, blockGen.byName(closureTmp)))
           if cont != null then {
-            cont(fn, blockGen)
+            cont(blockGen.byName(fnTmp), blockGen)
           } else {
-            blockGen.statement({ pushData(fn) })
+            blockGen.statement({ pushData(blockGen.byName(fnTmp)) })
           }
         }
         case c : ComputesBinding[vT,T] =>
@@ -1099,42 +1077,33 @@ object Computes {
               import qctx.tasty._
               implicit val e1 = c.argument.tType
 
-              val aType = c.argument.tType
-
-              val bloodSacrifice = '{
-                ${ blockGen.byName(c.argument.auxVar) } match {
-                  case _ => ()
-                }
-              }
-              val scrutinee = bloodSacrifice.unseal match {
-                case IsInlined(inl) => inl.body match {
-                  case IsMatch(m) => m.scrutinee
-                }
-              }
               Match(
-                scrutinee,
+                blockGen.byName(c.argument.auxVar).unseal,
                 (for((v,r) <- c.cases)
                   yield {
                     val bodyBlockGen = BlockGen(blockGen)
                     impl(r, TreeSet.empty, bodyBlockGen, null)
 
+                    val tType = c.argument.tType
                     val bloodSacrifice = '{
-                      ??? : ${aType} match {
-                        case x if x == ${ blockGen.byName(v.auxVar) } =>
-                          ()
+                      ??? : Any match {
+                        case x if x == ${ bodyBlockGen.byName(v.auxVar) } => ()
                       }
                     }
-                    println(s"SACRIFICE ${bloodSacrifice.show}")
-                    println(s"SAC2 ${bloodSacrifice.unseal}")
-                    // more hack because I can't generate var bindings myself
+
                     bloodSacrifice.unseal match {
-                      case IsInlined(inl) => inl.body match {
-                        case IsMatch(m) => m.cases.head match {
-                          case CaseDef(pattern, guard, _) =>
-                            CaseDef(pattern, guard, bodyBlockGen.getBlock().unseal)
-                        }
-                      }
+                      case Inlined(_, _, Match(_, List(CaseDef(pattern, guard, _)))) =>
+                        CaseDef(pattern, guard, bodyBlockGen.getBlock().unseal)
                     }
+
+
+                    /*CaseDef(
+                      Pattern.Value(
+                        bodyBlockGen.byName(v.auxVar).unseal match {
+                          case Typed(term, _) => term
+                        }),
+                      None,
+                      bodyBlockGen.getBlock().unseal)*/
                   }).toList ++
                 c.default.map(d =>
                     List({
@@ -1143,7 +1112,7 @@ object Computes {
 
                       // hack: steal default branch from donor match expression
                       val bloodSacrifice = '{
-                        ??? : ${ aType } match {
+                        ${ defaultBlockGen.byName(c.argument.auxVar) } match {
                           case _ => ()
                         }
                       }
@@ -1199,17 +1168,19 @@ object Computes {
                 Pattern.Value(Literal(Constant(getPC(key)))),
                 None,
                 // TODO: split each block into its own method, so we don't hit the method size limit
-                block.unseal)
+                '{
+                  println(s"PC ${${ getPC(key).toExpr }}")
+                  println(s"PC_STACK ${${ rootBlock.byName(PC_STACK) }}")
+                  println(s"DATA_STACK ${${ rootBlock.byName(DATA_STACK) }}")
+                  ${ block }
+                }.unseal)
           }).toList)).seal.cast[Unit]
     })
-
-    println(s"nextPC $nextPC")
-    println(blockMap)
 
     val expr = rootBlock.getBlockWithResult[T]({ popData })
     ;{
       import qctx.tasty._
-      println(expr.unseal)
+      //println(expr.unseal)
       println(expr.show)
     }
     expr
