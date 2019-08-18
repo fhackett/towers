@@ -18,39 +18,44 @@ object JSON {
   import Computes._
   import Grammar._
 
-  val range : Computes[(Char,Char)==>Grammar[Char,Char]] =
+  val range : Computes[(Char,Char)==>Grammar[Char,Char]] = C(
     (from : Computes[Char], to : Computes[Char]) =>
       anyTerm[Char].filter((v : Computes[Char]) =>
           expr((from, to, v), {
             case (from, to, v) => '{ ${ v } >= ${ from } && ${ v } <= ${ to } }
           }))
+  )
 
-  val commaSep : Computes[Grammar[Char,Unit]] =
+  val commaSep : Computes[Grammar[Char,Unit]] = C(
     for(_ : Computes[Unit] <- ws;
         _ : Computes[Char] <- term(',');
         _ : Computes[Unit] <- ws)
       yield const(())
+  )
 
-  val ws : Computes[Grammar[Char,Unit]] =
+  val ws : Computes[Grammar[Char,Unit]] = C(
     choose(
       term('\u0009'),
       term('\u000A'),
       term('\u000D'),
       term('\u0020')).repDrop()
+  )
 
-  val sign : Computes[Grammar[Char,Boolean]] =
+  val sign : Computes[Grammar[Char,Boolean]] = C(
     choose(
       term('+').map((_ : Computes[Char]) => const(true)),
       term('-').map((_ : Computes[Char]) => const(false)),
       succeed(const(true)))
+  )
 
-  val hexDigit : Computes[Grammar[Char,Char]] =
+  val hexDigit : Computes[Grammar[Char,Char]] = C(
     choose(
       range(const('0'),const('9')).map((d : Computes[Char]) => expr1(d, d => '{ (${ d } - '0').toChar })),
       range(const('a'),const('f')).map((d : Computes[Char]) => expr1(d, d => '{ (${ d } - 'a' + 10).toChar })),
       range(const('A'),const('F')).map((d : Computes[Char]) => expr1(d, d => '{ (${ d } - 'A' + 10).toChar })))
+  )
 
-  val stringLiteral : Computes[Grammar[Char,String]] =
+  val stringLiteral : Computes[Grammar[Char,String]] = C(
     for(_ : Computes[Char] <- term('"');
         chars : Computes[Seq[Char]] <- (
           choose(
@@ -85,16 +90,18 @@ object JSON {
           ).rep();
         _ : Computes[Char] <- term('"'))
       yield expr1(chars, chars => '{ ${ chars }.mkString })
+  )
 
-  val array : Computes[Grammar[Char,JSONValue]] =
+  val array : Computes[Grammar[Char,JSONValue]] = C(
     for(_ : Computes[Char] <- term('[');
         _ : Computes[Unit] <- ws;
         vs : Computes[Seq[JSONValue]] <- value.rep(sep=commaSep);
         _ : Computes[Unit] <- ws;
         _ : Computes[Char] <- term(']'))
       yield expr1(vs, vs => '{ JSONArray(${ vs }) : JSONValue })
+  )
 
-  val `object` : Computes[Grammar[Char,JSONValue]] =
+  val `object` : Computes[Grammar[Char,JSONValue]] = C(
     for(_ : Computes[Char] <- term('{');
         _ : Computes[Unit] <- ws;
         pairs : Computes[Seq[(String,JSONValue)]] <- (
@@ -108,17 +115,21 @@ object JSON {
         _ : Computes[Unit] <- ws;
         _ : Computes[Char] <- term('}'))
       yield expr1(pairs, pairs => '{ JSONObject(${ pairs }.toMap) : JSONValue })
+  )
 
-  val string : Computes[Grammar[Char,JSONValue]] =
+  val string : Computes[Grammar[Char,JSONValue]] = C(
     stringLiteral.map((str : Computes[String]) => expr1(str, str => '{ JSONString(${ str }) : JSONValue }))
+  )
 
-  val `true` : Computes[Grammar[Char,JSONValue]] =
+  val `true` : Computes[Grammar[Char,JSONValue]] = C(
     str("true").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
+  )
 
-  val `false` : Computes[Grammar[Char,JSONValue]] =
+  val `false` : Computes[Grammar[Char,JSONValue]] = C(
     str("false").map((_ : Computes[Unit]) => expr((), _ => '{ JSONTrue : JSONValue }))
+  )
 
-  val value : Computes[Grammar[Char,JSONValue]] =
+  val value : Computes[Grammar[Char,JSONValue]] = C(
     choose(
       `object`,
       array,
@@ -126,19 +137,22 @@ object JSON {
       `false`,
       string)/*,
       number)*/
+  )
 
-  val json : Computes[Grammar[Char,JSONValue]] =
+  val json : Computes[Grammar[Char,JSONValue]] = C(
     for(_ : Computes[Unit] <- ws;
         v : Computes[JSONValue] <- value;
         _ : Computes[Unit] <- ws;
         _ : Computes[Unit] <- eofTerm[Char])
      yield v //
+  )
 
-  val stringParser : Computes[String|=>Option[JSONValue]] =
+  val stringParser : Computes[String|=>Option[JSONValue]] = C(
     (str : Computes[String]) => {
       val input : Computes[InputSource[Char]] = Grammar.makeStringInput(str)
       Grammar.parse(json, input)
     }
+  )
 
   inline def parseString(str : String) : Option[JSONValue] = ${ Computes.reifyCall(stringParser, '{ str }) }
 
