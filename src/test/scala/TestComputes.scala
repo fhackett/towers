@@ -15,6 +15,6 @@ object TestComputes extends App {
 
   println(doUnimapAdd1(List(1,2,3,4)))
 
-  //println(doUnimap2Add1(List(1,2,3,4)))
+  println(doUnimap2Add1(List(1,2,3,4)))
 }
 
