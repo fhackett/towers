@@ -387,7 +387,7 @@ object Computes {
             c.binding = oldBinding
 
             // if somehow an indirect does not contain any back-references, remove the indirect
-            if !isRecursive(c) then {
+            if !isRecursive(newInd) then {
               (newBind, isRecursive)
             } else {
               (newInd, isRecursive)
@@ -517,7 +517,7 @@ object Computes {
             c.binding = oldBinding
 
             // if somehow an indirect does not contain any back-references, remove the indirect
-            if !outCtx.isRecursive(c) then {
+            if !outCtx.isRecursive(newInd) then {
               (newBind, outCtx)
             } else {
               (newInd, outCtx.copy(touched=outCtx.touched + ((newInd.key, (outCtx.isRecursive,outCtx.isReferenced)))))
