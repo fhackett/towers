@@ -3,7 +3,7 @@ package towers.computes
 import Predef.{any2stringadd => _, _} // allow implicits to override +
 
 import scala.collection.mutable.{HashMap, HashSet, ArrayStack, ArrayBuffer}
-import scala.collection.{Set,Map}
+import scala.collection.{Set,Map,Seq}
 import scala.collection.immutable.TreeSet
 
 import quoted._
@@ -21,7 +21,7 @@ trait OpContext {
 }
 
 sealed abstract class Computes[T] {
-  def tType : Type[T]
+  def tType given QuoteContext : Type[T]
 
   private val k1 = new AnyRef
   private val k2 = new AnyRef
@@ -36,7 +36,7 @@ sealed abstract class Computes[T] {
 }
 
 abstract class Computable[T : Type] given QuoteContext extends Computes[T] {
-  val tType = implicitly[Type[T]]
+  def tType given QuoteContext = implicitly[Type[T]]
   // translate this Computable into some lower-level implementation
   def flatten : Computes[T]
 
@@ -47,7 +47,7 @@ abstract class Computable[T : Type] given QuoteContext extends Computes[T] {
 }
 
 final class ComputesVar[T : Type]() given QuoteContext extends Computes[T] {
-  val tType = implicitly[Type[T]]
+  def tType given QuoteContext = implicitly[Type[T]]
   val auxVar = this
   
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
@@ -55,9 +55,9 @@ final class ComputesVar[T : Type]() given QuoteContext extends Computes[T] {
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
 }
 
-final class ComputesIndirect[T](var binding : Computes[T]) given QuoteContext extends Computes[T] {
-  def tType = binding.tType
-  def auxVar = binding.auxVar
+final class ComputesIndirect[T : Type](var binding : Computes[T]) given QuoteContext extends Computes[T] {
+  def tType given QuoteContext = implicitly[Type[T]]
+  def auxVar = ???
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
   def toComputesSeq =
@@ -71,7 +71,7 @@ final class ComputesIndirect[T](var binding : Computes[T]) given QuoteContext ex
 }
 
 final class ComputesBinding[V, T : Type](val name : ComputesVar[V], val value : Computes[V], val body : Computes[T]) given QuoteContext extends Computes[T] {
-  val tType = implicitly[Type[T]]
+  def tType given QuoteContext = implicitly[Type[T]]
   val auxVar = ComputesVar[T]()
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
@@ -81,7 +81,7 @@ final class ComputesBinding[V, T : Type](val name : ComputesVar[V], val value : 
 }
 
 final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn : Seq[Expr[_]] => Expr[T]) given QuoteContext extends Computes[T] {
-  val tType = implicitly[Type[T]]
+  def tType given QuoteContext = implicitly[Type[T]]
   val auxVar = ComputesVar[T]()
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ComputesExpr(seq, exprFn)
@@ -91,7 +91,7 @@ final class ComputesExpr[T : Type](val parameters : Seq[Computes[_]], val exprFn
 }
 
 final class ComputesApplication[FnType <: Computes.==>[_,Result], Result : Type](val arguments : Seq[Computes[_]], val function : Computes[FnType]) given QuoteContext extends Computes[Result] {
-  val tType = implicitly[Type[Result]]
+  def tType given QuoteContext = implicitly[Type[Result]]
   val auxVar = ComputesVar[Result]()
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
@@ -103,7 +103,7 @@ final class ComputesApplication[FnType <: Computes.==>[_,Result], Result : Type]
 }
 
 class ComputesLazyRef[T](ref : given QuoteContext => Computes[T]) extends Computes[T] {
-  def tType = ??? // see below
+  def tType given QuoteContext = computes.tType
   def auxVar = ??? // I could implement this, but it's needlessly complicated and no-one should ever be referencing it
   def computes given QuoteContext : Computes[T] = ref
 
@@ -114,7 +114,7 @@ class ComputesLazyRef[T](ref : given QuoteContext => Computes[T]) extends Comput
 }
 
 class ComputesFunction[FnType <: Computes.==>[_,Result] : Type, Result : Type](val inst : Computes.FnInst[FnType], val parameters : Seq[ComputesVar[_]], val body : Computes[Result]) given QuoteContext extends Computes[FnType] {
-  val tType = implicitly[Type[FnType]]
+  def tType given QuoteContext = implicitly[Type[FnType]]
   val auxVar = ComputesVar[FnType]()
 
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = ???
@@ -128,7 +128,7 @@ final class ComputesSwitch[Arg, Result : Type](
   val cases : Seq[(Computes[Arg],Computes[Result])],
   val default : Option[Computes[Result]]
 ) given QuoteContext extends Computes[Result] {
-  val tType = implicitly[Type[Result]]
+  def tType given QuoteContext = implicitly[Type[Result]]
   val auxVar = ComputesVar[Result]()
 
   private def pairCases(cases : Seq[Computes[_]]) : Seq[(Computes[Arg],Computes[Result])] = {
@@ -373,11 +373,11 @@ object Computes {
         Predef.assert(indirect.binding == null)
         (indirect, Set(indirect))
       } else {
-        println(s"IND REACH ${computes.key} ${computes}")
+        //println(s"IND REACH ${computes.key} ${computes}")
         computes match {
           case c : ComputesIndirect[T] => {
             Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
-            val newInd = ComputesIndirect[T](null)
+            val newInd = ComputesIndirect[T](null) given (c.tType,the[QuoteContext])
             val oldBinding = c.binding
             // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
             c.binding = null
@@ -394,7 +394,7 @@ object Computes {
             }
           }
           case _ => {
-            val indirect = ComputesIndirect[T](null)
+            val indirect = ComputesIndirect[T](null) given (computes.tType,the[QuoteContext])
             val innerIndirects = indirects + ((computes.key, indirect))
             
             val (result, isRecursive) = computes match {
@@ -409,7 +409,7 @@ object Computes {
                   c.inst.asInstanceOf[FnInst[f]],
                   c.parameters,
                   body
-                ) given (c.tType.asInstanceOf[Type[f]], c.body.tType, the[QuoteContext])).asInstanceOf[Computes[T]]
+                ) given (c.tType.asInstanceOf[Type[f]], body.tType, the[QuoteContext])).asInstanceOf[Computes[T]]
                 (result, isRec : Set[Computes[_]])
               }
               case c : ComputesBinding[v,T] => {
@@ -470,6 +470,7 @@ object Computes {
             // we've already seen before. This should specifically recurse over only new nodes.
             val inCtx2 = inCtx.copy(touched=inCtx.touched ++ outCtx.touched)
             val (fWithRedirects, _) = injectIndirects(f, Map.empty, inCtx2.touched)
+            println(s"action ${computes.key} $computes")
             val (result, nestedOutCtx) = impl(fWithRedirects, inCtx2)
             // FIXME: ensure OutCtx contains correct isReferenced and isRecursive info, or we start deleting Binding and Indirect we actually
             // needed
@@ -504,23 +505,31 @@ object Computes {
           isReferenced=isReferenced,
           touched=Map.empty))
       } else {
+        println(s"impl ${computes.key} $computes")
         computes match {
           case c : ComputesIndirect[T] => {
-            Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
-            val newInd = ComputesIndirect[T](null)
-            val oldBinding = c.binding
-            // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
-            c.binding = null
-            
-            val (newBind, outCtx) = impl(oldBinding, inCtx.copy(substitutions=inCtx.substitutions + ((c.key, (newInd,null)))))
-            newInd.binding = newBind
-            c.binding = oldBinding
+            if c.binding != null then {
+              Predef.assert(c.binding != null) // you should never reach a null indirect - those should always be in substitutions
+              val newInd = ComputesIndirect[T](null) given (c.tType,the[QuoteContext])
+              val oldBinding = c.binding
+              // (temporarily) set the binding to null to ensure there is no way to follow the cycle from inside the cycle
+              c.binding = null
+              
+              val (newBind, outCtx) = impl(oldBinding, inCtx.copy(substitutions=inCtx.substitutions + ((c.key, (newInd,null)))))
+              newInd.binding = newBind
+              c.binding = oldBinding
 
-            // if somehow an indirect does not contain any back-references, remove the indirect
-            if !outCtx.isRecursive(newInd) then {
-              (newBind, outCtx)
+              // if somehow an indirect does not contain any back-references, remove the indirect
+              if !outCtx.isRecursive(newInd) then {
+                (newBind, outCtx)
+              } else {
+                (newInd, outCtx.copy(touched=outCtx.touched + ((newInd.key, (outCtx.isRecursive,outCtx.isReferenced)))))
+              }
             } else {
-              (newInd, outCtx.copy(touched=outCtx.touched + ((newInd.key, (outCtx.isRecursive,outCtx.isReferenced)))))
+              (c, OutCtx(
+                isRecursive=Set(c),
+                isReferenced=Set.empty,
+                touched=Map(c.key -> (Set(c), Set.empty))))
             }
           }
           case _ => {
@@ -560,7 +569,7 @@ object Computes {
                       case ((name : ComputesVar[t], value), body) =>
                         // these two types should be the same, and this convinces the type system this is so
                         type VT = t
-                        implicit val e1 = body.tType
+                        implicit val e1 : Type[T] = body.tType
                         value match {
                           case v : Computes[VT] =>
                             ComputesBinding[t, T](name, v, body)
@@ -569,7 +578,7 @@ object Computes {
 
                     // process the result via the Binding case, allowing for things like arguments never being referenced
                     // and being accessed and inlined via InCtx.known, etc...
-                    impl(inlined, inCtx)
+                    impl(inlined, inCtx.copy(touched=Map.empty))
                   }
                   case _ => {
                     generalProc(c, inCtx) // if you can't inline, just give up and process c the generic way
@@ -631,8 +640,8 @@ object Computes {
     }
 
     val (withIndirects, _) = injectIndirects(computes, Map.empty, Map.empty)
-    println("WITHINDIRECTS")
-    printComputes(withIndirects)
+    //println("WITHINDIRECTS")
+    //printComputes(withIndirects)
     val (result, _) = impl(withIndirects, InCtx.empty)
     //println("REWRITE")
     //printComputes(result)
@@ -668,9 +677,9 @@ object Computes {
     val qctx = qctx_
 
     def bind[T](name : ComputesVar[T], gen : given QuoteContext => Expr[T]) given KeyContext : BlockGen = {
-      import qctx.tasty._
       val expr : Expr[T] = gen
-      implicit val e1 = name.tType
+      implicit val e1 : Type[T] = name.tType
+      import qctx.tasty._
       val bloodSacrifice = '{
         val bind : T = ${ expr }
         bind
@@ -828,16 +837,16 @@ object Computes {
       }
     }
     println("RAW")
-    printComputes(computes)
+    //printComputes(computes)
     val inlinedComputes = performInlining(computes)
     println("INLINE1")
-    printComputes(inlinedComputes)
+    //printComputes(inlinedComputes)
     val flattenedComputes = flatten(inlinedComputes)
     println("FLATTENED")
-    printComputes(flattenedComputes)
+    //printComputes(flattenedComputes)
     val inlinedComputes2 = performInlining(flattenedComputes)
     println("INLINE2")
-    printComputes(inlinedComputes2)
+    //printComputes(inlinedComputes2)
 
     val rootKey = inlinedComputes2.key
 
@@ -884,11 +893,11 @@ object Computes {
     rootBlock.bind(DATA_STACK, '{ ArrayStack[Any]() })
 
     def pushPC(pc : Expr[Int]) given QuoteContext : Expr[Unit] =
-      '{ ${ rootBlock.byName(PC_STACK) }.push(${ pc }) }
+      '{ ${ rootBlock.byName(PC_STACK) }.push(${ pc }); () }
     def popData[T : Type] given QuoteContext : Expr[T] =
       '{ ${ rootBlock.byName(DATA_STACK) }.pop.asInstanceOf[T] }
     def pushData(data : Expr[Any]) given QuoteContext : Expr[Unit] =
-      '{ ${ rootBlock.byName(DATA_STACK) }.push(${ data }) }
+      '{ ${ rootBlock.byName(DATA_STACK) }.push(${ data }); () }
 
     val pcMap = HashMap[ComputesKey,Int]()
     var nextPC = 0
@@ -940,7 +949,7 @@ object Computes {
       toPreserve.toSeq.reverse.foreach(k => {
         vNodes(k) match {
           case v : ComputesVar[t] => {
-            implicit val vT = v.tType
+            implicit val vT : Type[t] = v.tType
             blockGen.bind(v, { popData[t] })
           }
         }
@@ -949,7 +958,7 @@ object Computes {
     
     def impl[T](computes : Computes[T], toPreserve : TreeSet[ComputesKey], blockGen : BlockGen, cont : Continuation[T]) : Unit = {
       println(s"REACH ${computes.key} $computes ${nodeClosures(computes.key)}")
-      implicit val tType = computes.tType
+      implicit val tType : Type[T] = computes.tType
       computes match {
         case c : ComputesIndirect[T] =>
           c.binding match {
@@ -1003,7 +1012,7 @@ object Computes {
 
             blockMap(contTmp.key) = contBlockGen.getBlock()
           }
-          implicit val e1 = c.function.tType
+          implicit val e1 : Type[fnType] = c.function.tType
           impl(c.function, TreeSet.empty ++ c.arguments.flatMap(a => nodeClosures(a.key)), blockGen, (fn, blockGen) => {
             blockGen.statement({ pushPC('{ ${ fn }.pc }) })
             blockGen.statement({ pushData('{ ${ fn }.closure }) })
@@ -1017,7 +1026,7 @@ object Computes {
             val fnBlockGen = BlockGen()
             c.parameters.toSeq.reverse.foreach({
               case p : ComputesVar[t] => {
-                implicit val tt = p.tType
+                implicit val tt : Type[t] = p.tType
                 fnBlockGen.bind(p, { popData[t] })
               }
             })
@@ -1026,7 +1035,8 @@ object Computes {
             nodeClosures(c.key).zipWithIndex.foreach({
               case (k, i) => {
                 val v = vNodes(k)
-                fnBlockGen.bind(v, '{ ${ fnBlockGen.byName(closureTmp) }.apply(${ i.toExpr }).asInstanceOf[${v.tType}] })
+                val vType = v.tType
+                fnBlockGen.bind(v, '{ ${ fnBlockGen.byName(closureTmp) }.apply(${ i.toExpr }).asInstanceOf[${vType}] })
               }
             })
             impl(c.body, TreeSet.empty, fnBlockGen, null)
@@ -1075,8 +1085,9 @@ object Computes {
           }
           bindAuxSet(c.argument :: c.cases.map(_._1).toList, TreeSet.empty ++ c.cases.map(_._2).flatMap(r => nodeClosures(r.key)), blockGen, (unit, blockGen) => {
             blockGen.statement(given (qctx : QuoteContext) => {
+              implicit val e1 : Type[argT] = c.argument.tType
+
               import qctx.tasty._
-              implicit val e1 = c.argument.tType
 
               Match(
                 blockGen.byName(c.argument.auxVar).unseal,
@@ -1218,8 +1229,8 @@ object Computes {
     def tryFold(implicit opCts : OpContext, keyCtx : KeyContext) = None
 
     def flatten = {
-      implicit val e1 = tuple._1.tType
-      implicit val e2 = tuple._2.tType
+      implicit val e1 : Type[T1] = tuple._1.tType
+      implicit val e2 : Type[T2] = tuple._2.tType
       ComputesExpr(List(tuple._1, tuple._2), ex => '{ (${ ex(0).asInstanceOf[Expr[T1]] }, ${ ex(1).asInstanceOf[Expr[T2]] }) })
       //expr(tuple : (Computes[T1],Computes[T2]), (etpl : (Expr[T1],Expr[T2])) => '{ (${ etpl._1 }, ${ etpl._2 }) })
     }

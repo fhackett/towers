@@ -1,5 +1,7 @@
 package towers.grammar
 
+import scala.collection.{Seq}
+
 import quoted._
 
 import towers.computes.{Computes,Computable,OpContext,KeyContext}
@@ -233,7 +235,7 @@ class SuccessGrammar[E : Type, T : Type](var t : Computes[T]) given QuoteContext
   
   def toComputesSeq = Seq(t)
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
-    case Seq(t : Computes[T]) => SuccessGrammar(t)
+    case Seq(t : Computes[T]) => SuccessGrammar(t) given (the[Type[E]], the[Type[T]], the[QuoteContext])
   }
 
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
@@ -246,7 +248,7 @@ class FailGrammar[E : Type, T : Type](var err : Computes[Error]) given QuoteCont
   
   def toComputesSeq = Seq(err)
   def likeFromSeq(seq : Seq[_ <: Computes[_]])(implicit keyCtx : KeyContext) = seq match {
-    case Seq(err : Computes[Error]) => FailGrammar(err)
+    case Seq(err : Computes[Error]) => FailGrammar(err) given (the[Type[E]], the[Type[T]], the[QuoteContext])
   }
 
   def tryFold(implicit opCtx : OpContext, keyCtx : KeyContext) = None
