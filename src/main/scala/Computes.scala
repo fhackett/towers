@@ -3,7 +3,7 @@ package towers.computes
 import Predef.{any2stringadd => _, _} // allow implicits to override +
 
 import scala.collection.mutable.{HashMap, HashSet, ArrayStack, ArrayBuffer}
-import scala.collection.{Set,Map,Seq}
+import scala.collection.{Seq}
 import scala.collection.immutable.TreeSet
 
 import quoted._
@@ -289,7 +289,7 @@ object Computes {
       ComputesApplication(List(arg1, arg2, arg3, arg4, arg5), ref(fn))
   }
 
-  trait AnalysisAction[Result] {
+  /*trait AnalysisAction[Result] {
     def analyse[T](computes : Computes[T], results : Map[ComputesKey,Result])(implicit keyCtx : KeyContext) : Result
     def merge(left : Result, right : Result)(implicit keyCtx : KeyContext) : Result
     def zeroResult : Result
@@ -318,7 +318,7 @@ object Computes {
     // it takes 2 runs to reach fixpoint. 1 to propagate within each cycle, and the second to propagate across any loops
     iter(computes)
     iter(computes)
-  }
+  }*/
 
   trait RewriteAction {
     def apply[T](computes : Computes[T])(implicit opCtx : OpContext) : Option[Computes[T]]
