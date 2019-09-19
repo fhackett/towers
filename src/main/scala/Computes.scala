@@ -10,6 +10,7 @@ import scala.deriving._
 import scala.quoted._
 import scala.tasty._
 import scala.compiletime._
+import scala.reflect._
 
 sealed abstract class ComputesKey
 case object NoKey extends ComputesKey
@@ -21,23 +22,40 @@ trait KeyContext {
 
 sealed trait RewriteContext {
   def get(index : Int) : Computes[_]
+  def getType(index : Int) : Type[_]
 }
 
-sealed abstract class CRewrite[T]
+sealed abstract class CRewrite[T] {
+  //def flatMap[T2](fn : Computes[T] => CRewrite[T2]) : CRewrite[T2] =
 
-sealed abstract class CHandle[T] {
-  def tType given QuoteContext : Type[T]
+}
+case class NoRewrite[T]() extends CRewrite[T]
+case class ClassTagMatchRewrite[T, R <: Rule[T] : ClassTag]() extends CRewrite[T] {
+  val tag = classTag[R]
+}
+
+sealed trait Typed[T] {
+  def getType given RewriteContext : Type[T]
+}
+
+sealed abstract class CHandle[T] extends Typed[T] {
   val index : Int
 
   def get given (ctx : RewriteContext) : Computes[T] =
     ctx.get(index).asInstanceOf[Computes[T]]
 
-  def findByRule[R <: Rule[_]] given (ctx : RewriteContext) : CRewrite[T] = ???
+  def getType given (ctx : RewriteContext) : Type[T] =
+    ctx.getType(index).asInstanceOf[Type[T]]
+
+  def findByRule[R <: Rule[T] : ClassTag] given (ctx : RewriteContext) : CRewrite[T] =
+    ClassTagMatchRewrite[T, R]()
 }
 
-sealed abstract class CNHandle[T] {
-  def tType given QuoteContext : Type[T]
+sealed abstract class CNHandle[T] extends Typed[T] {
   val index : Int
+
+  def getType given (ctx : RewriteContext) : Type[T] =
+    ctx.getType(index).asInstanceOf[Type[T]]
 }
 
 /*
@@ -55,8 +73,9 @@ sealed trait RuleMagic[R <: Rule[_]] {
   val handles : List[AnyRef]
   def makeInstance : R
   def membersToList(members : ComputesMembers) : List[Computes[_]]
-  def tType given QuoteContext : Type[T]
+  def getType given QuoteContext given RewriteContext : Type[T]
   type ComputesMembers <: Tuple
+  type ComputesRewrites <: Tuple
 }
 
 object RuleMagic {
@@ -66,14 +85,12 @@ object RuleMagic {
       case _ : ((CNHandle[t],_) *: tail) => {
         type T = t
         new CNHandle[T]() {
-          def tType given QuoteContext : Type[T] = implicit match { case t : Type[T] => t }
           val index : Int = inline constValue[Index] match { case idx => idx }
         } :: makeHandles[S[Index],tail]
       }
       case _ : ((CHandle[t],_) *: tail) => {
         type T = t
         new CHandle[T]() {
-          def tType given QuoteContext : Type[T] = implicit match { case t : Type[T] => t }
           val index : Int = inline constValue[Index] match { case idx => idx }
         } :: makeHandles[S[Index],tail]
       }
@@ -84,45 +101,84 @@ object RuleMagic {
       }
     }
 
+  inline def makeContext[Types <: Tuple](handles : List[AnyRef]) given RewriteContext <: Any =
+    inline erasedValue[Types] match {
+      case _ : Unit => ()
+      case _ : (CNHandle[t] *: tl) => new {
+        val innerCtx = makeContext[tl](handles.tail)
+        given as Type[t] = handles.head.asInstanceOf[Typed[t]].getType
+        import given innerCtx._
+      }
+      case _ : (CHandle[t] *: tl) => new {
+        val innerCtx = makeContext[tl](handles.tail)
+        given as Type[t] = handles.head.asInstanceOf[Typed[t]].getType
+        import given innerCtx._
+      }
+    }
+
+  inline def withContext[T,Types <: Tuple](handles : List[AnyRef], base : =>Type[T]) given RewriteContext : Type[T] =
+    inline erasedValue[Types] match {
+      case _ : Unit => base
+      case _ : (CNHandle[t] *: tl) => {
+        given as Type[t] = handles.head.asInstanceOf[Typed[t]].getType
+        withContext[T,tl](handles.tail, base)
+      }
+      case _ : (CHandle[t] *: tl) => {
+        given as Type[t] = handles.head.asInstanceOf[Typed[t]].getType
+        withContext[T,tl](handles.tail, base)
+      }
+    }
+
   inline def derived[R <: Rule[_]] given (m : Mirror.ProductOf[R]) <: RuleMagic[R] = new RuleMagic[R] {
     val handles = makeHandles[Tuple.Size[m.MirroredElemTypes],Tuple.Zip[m.MirroredElemTypes,m.MirroredElemLabels]]
     def makeInstance : R = m.fromProduct(ArrayProduct(handles.toArray))
     def membersToList(members : ComputesMembers) : List[Computes[_]] = members.toArray.toList.asInstanceOf[List[Computes[_]]]
-    def tType given QuoteContext : Type[T] = implicit match { case t : Type[T] => t }
     type ComputesMembers = Tuple.Map[m.MirroredElemTypes,[m]=>>m match {
       case CNHandle[t] => ComputesName[t]
       case CHandle[t] => Computes[t]
     }]
+    type ComputesRewrites = Tuple.Map[m.MirroredElemTypes,[m]=>>m match {
+      case CNHandle[t] => Unit // FIXME
+      case CHandle[t] => CRewrite[t]
+    }]
   }
 }
 
-abstract class Rule[T] {
-  def rewrite : given RewriteContext => CRewrite[T]
+abstract class Rule[T] given (t : Type[T]) {
+  given theType as Type[T] = t
+  def rewrite : given RewriteContext => CRewrite[T] = NoRewrite()
   def lower : given RewriteContext => Computes[T]
 }
 
 sealed abstract class Computes[T] {
-  //def tType given QuoteContext : Type[T]
   def key given (keyCtx : KeyContext) : ComputesKey = keyCtx.getKeyOf(this)
 }
 
 object Computes {
 
-  inline def constructor[R <: Rule[_]] given (magic : RuleMagic[R]) : (magic.ComputesMembers)=>Computes[magic.T] =
+  inline def construct[R <: Rule[_]] given (magic : RuleMagic[R]) : (magic.ComputesMembers)=>Computes[magic.T] =
     (members : magic.ComputesMembers) =>
       ComputesComposite[magic.T,R](magic.makeInstance, magic.membersToList(members))
+
+  inline def expr[Members <: Tuple, T, F](
+    members : Members,
+    fn : F
+  ) given Tuple.IsMappedBy[Computes][Members] given (tpl : TupledFunction[F,Tuple.Map[Tuple.InverseMap[Members,Computes],Expr]=>given QuoteContext=>Expr[T]]) : Computes[T] =
+    ComputesExpr[T](members.toArray.toList, members => tpl.tupled(fn)(Tuple.fromArray(members.toArray).asInstanceOf[Members]))
 }
 
-final class ComputesComposite[T, R <: Rule[T]](val rule : R, val members : List[Computes[_]]) given (magic_ : RuleMagic[R]) extends Computes[T] {
+final case class ComputesComposite[T, R <: Rule[T]](val rule : R, val members : List[Computes[_]]) given (magic_ : RuleMagic[R]) extends Computes[T] {
   val magic = magic_
 }
+
+// generate expressions via subclassing, allow simple version w/ all fields available and complex version w/ choice of ordering
+final case class ComputesExpr[T](val fn : List[Expr[_]]=>Expr[_], val members : List[Computes[_]]) extends Computes[T]
 
 final class ComputesName[T] extends Computes[T]
 
 // test
 
-case class AddInts(lhs : CHandle[Int], rhs : CHandle[Int]) extends Rule[Int] derives RuleMagic {
-  def rewrite = ???
+case class AddInts[A,B](lhs : CHandle[A], rhs : CHandle[B]) extends Rule[(A,B)] derives RuleMagic {
   def lower = ??? //Computes.constructor[AddInts]((lhs.get, rhs.get))
 }
 
