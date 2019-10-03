@@ -1,4 +1,4 @@
-package towers.computes
+package towers
 
 import Predef.{any2stringadd => _, _} // allow implicits to override +
 
@@ -32,6 +32,36 @@ sealed abstract class Computes[T] {
 }
 
 object Computes {
+
+  def compile[T : Type](c : Computes[T])(given qctx : QuoteContext) : Expr[T] =
+    '{ ??? }
+
+  trait ArgsFromTuple[Tpl <: Tuple] {
+    val size : Int 
+  }
+
+  given ArgsFromTuple[Unit] {
+    val size = 0
+  }
+
+  given [Hd, Tl <: Tuple](given aft : ArgsFromTuple[Tl]) : ArgsFromTuple[Hd *: Tl] {
+    val size = aft.size + 1
+  }
+
+  def compileFn[Args <: Tuple : Type, Result : Type]
+               (c : Computes[Args==>Result])
+               (given qctx : QuoteContext, aft : ArgsFromTuple[Args]) : Expr[Args=>Result] = '{
+    (args : Args) => {
+      val data = args.toIArray
+      ${
+        compile(c({
+          val tplSize = aft.size
+          Tuple.fromArray((0 until tplSize).map(i => expr((), () => '{ data(${ Expr(i) }) })).toArray).asInstanceOf[Tuple.Map[Args,Computes]]
+        })) 
+      }
+    }
+  }
+
   def ref[T](body : (given QuoteContext)=>Computes[T]) : Computes[T] = Ref(body)
 
   def let[V:Type,T](value : Computes[V], body : Computes[V]=>Computes[T]) = {
@@ -39,9 +69,10 @@ object Computes {
     Binding(name, value, body(name))
   }
 
-  inline def expr[Args <: Tuple, Result : Type, F](args : Args, fn : F)
-                 (given tpl : TupledFunction[F,Tuple.Map[Tuple.InverseMap[Args,Computes],Expr]=>Expr[Result]])
-                 (given Tuple.IsMappedBy[Computes][Args]): Computes[Result] = {
+  def expr[Args <: Tuple, Result : Type, F]
+          (args : Args, fn : F)
+          (given tpl : TupledFunction[F,Tuple.Map[Tuple.InverseMap[Args,Computes],Expr]=>Expr[Result]])
+          (given Tuple.IsMappedBy[Computes][Args]): Computes[Result] = {
     type PlainArgs = Tuple.InverseMap[Args,Computes]
     type ExprArgs = Tuple.Map[PlainArgs,Expr]
     Code(
@@ -67,14 +98,23 @@ object Computes {
     Function(tpl.tupled(fn)(args), args.toArray.toList.asInstanceOf[List[Name[_]]])
   }
 
-  /*
-  inline given makeFunction[Args <: Tuple, Result, F](given tpl : TupledFunction[F,Args=>Computes[Result]])(given Tuple.IsMappedBy[Computes][Args]): Conversion[F,Computes[Tuple.InverseMap[Args,Computes]==>Result]] = new {
-    type PlainArgs = Tuple.InverseMap[Args,Computes]
-    def apply(fn : F) : Computes[PlainArgs==>Result] = {
-      val args : Args = makeFunctionArgs[PlainArgs].asInstanceOf[Args]
-      Function[PlainArgs,Result](tpl.tupled(fn)(args), args.toArray.toList.asInstanceOf[List[Name[_]]])
-    }
-  }*/
+  // broken by lampepfl/dotty#7349
+  inline given ComputesFromFunction[Args <: Tuple, Result, F](given tpl : TupledFunction[F,Args=>Computes[Result]])(given Tuple.IsMappedBy[Computes][Args]): Conversion[F,Computes[Tuple.InverseMap[Args,Computes]==>Result]] = new {
+    def apply(f : F) = fun(f)
+  }
+
+  def (c : Computes[Args==>Result]) apply[Args <: Tuple, Result](args : Tuple.Map[Args,Computes]) : Computes[Result] =
+    Application(c, args.toArray.toList.asInstanceOf[List[Computes[_]]])
+
+  def (c : Computes[Boolean]) branch[Result](t : Computes[Result], f : Computes[Result]) : Computes[Result] =
+    Branch(c, t, f)
+
+  def const[T : Type : Liftable](t : T) : Computes[T] =
+    Constant(t)
+
+  given ComputesFromConstant[T : Type : Liftable] : Conversion[T,Computes[T]] {
+    def apply(t : T) = const(t)
+  }
 
   final case class Composite[T : Type, R <: Rule.Instance[T]](val rule : R, val members : List[Computes[_]], val handles : List[CHandle[_]]) extends Computes[T] {
     val theType = summon[Type[T]]
@@ -89,6 +129,13 @@ object Computes {
   final case class Function[Args <: Tuple, Result](val body : Computes[Result], val args : List[Name[_]]) extends Computes[Args==>Result]
 
   final case class Binding[V, T](val name : Name[V], val value : Computes[V], val body : Computes[T]) extends Computes[T]
+
+  final case class Constant[T : Type : Liftable](val v : T) extends Computes[T] {
+    val theType = summon[Type[T]]
+    val liftable = summon[Liftable[T]]
+  }
+
+  final case class Branch[T](val condition : Computes[Boolean], val t : Computes[T], val f : Computes[T]) extends Computes[T]
 
   final class Name[T : Type] extends Computes[T] {
     val theType = summon[Type[T]]
@@ -146,7 +193,7 @@ object Rule {
     def lower : Any//CLower[T]
   }
 
-  private[computes] inline def makeHandles[Index <: Int, Members <: Tuple](ownerRef : =>Computes[_]) : Members = inline erasedValue[Members] match {
+  private[towers] inline def makeHandles[Index <: Int, Members <: Tuple](ownerRef : =>Computes[_]) : Members = inline erasedValue[Members] match {
     case _ : Unit => ().asInstanceOf[Members]
     case _ : (CHandle[hd] *: tl) => (new CHandle[hd] {
       val index = constValue[Index]

@@ -1,12 +1,19 @@
 
 lazy val latestDotty = dottyLatestNightlyBuild.get
 
-lazy val root = project
+ThisBuild / version := "0.1.0"
+ThisBuild / scalaVersion := latestDotty
+
+lazy val core = project
   .in(file("."))
   .settings(
-    name := "towers",
-    version := "0.1.0",
+    name := "towers")
 
-    scalaVersion := /*"0.19.0-RC1",*/ latestDotty,
-)
+lazy val testing = project
+  .in(file("testing"))
+  .aggregate(core)
+  .dependsOn(core)
+  .settings(
+    name := "towers-testing",
+    libraryDependencies += "com.novocode" % "junit-interface" % "0.11" % "test")
 
