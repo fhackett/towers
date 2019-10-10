@@ -18,5 +18,11 @@ class TestLambdas {
   def testAdd1 = {
     Assert.assertEquals(2, m_testAdd1(Tuple1(1)))
   }
+
+  inline def m_testMapAdd1 : Tuple1[List[Int]]=>List[Int] = ${ Computes.compileFn(test.mapAdd1) }
+  @Test
+  def testMapAdd1 = {
+    Assert.assertEquals(List(2,3,4,5), m_testMapAdd1(Tuple1(List(1,2,3,4))))
+  }
 }
 
