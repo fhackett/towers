@@ -23,7 +23,7 @@ def map[S : Type, T : Type : Liftable](list : Computes[List[S]], fn : Computes[T
           })
         }))
   } }
-  impl(Tuple1(list))
+  ref { impl(Tuple1(list)) }
 }
 
 val mapAdd1 : Computes[Tuple1[List[Int]]==>List[Int]] = ref { fun {

@@ -19,54 +19,8 @@ sealed abstract class CHandle[T] {
   lazy val owner : Computes[_]
 }
 
-/*
-inline def summonTuple[Elements <: Tuple] : Elements = inline erasedValue[Elements] match {
-  case _ : Unit => ()
-  case _ : (hd *: tl) => {
-    type H = hd
-    summonFrom {
-      case h : H => h *: summonTuple[tl]
-    }
-  }
-}
-
-inline def withImplicits[Implicits <: Tuple, T](implicits : Implicits)(t : =>T) : T = inline erasedValue[Implicits] match {
-  case _ : Unit => t
-  case _ : (hd *: tl) => {
-    type H = hd
-    given H = implicits.head
-    withImplicits(implicits.tail)(t)
-  }
-}*/
-
-trait DeferredType[T] {
-  def getType : (given QuoteContext)=>Type[T]
-}
-/*object DeferredType {
-  inline def synthesize[Items <: Tuple, T] : DeferredType[T] = new {
-    def getType : (given QuoteContext)=>Type[T] = inline erasedValue[Items] match {
-      case _ : Unit => summon[DeferredType[T]].getType
-      case _ : (hd *: tl) => {
-        type H = hd
-        summonFrom {
-          case dt : DeferredType[H] => {
-            given Type[H] = dt.getType
-            synthesize[tl,T].getType
-          }
-        }
-      }
-    }
-  }
-}*/
-
-inline given [T]: DeferredType[T] = new {
-  def getType = summonFrom {
-    case tpe : Type[T] => tpe
-  }
-}
-
 sealed abstract class Computes[T] {
-  val getType : (given QuoteContext)=>Type[T]
+  val theType : Type[T]
 }
 
 object Computes {
@@ -82,6 +36,8 @@ object Computes {
         ComputesKey(k)
       }
     }
+
+    final case class KeyRef[T](val key : ComputesKey) extends Computes[T]
 
     final case class NameKey(val i : Int)
     object NameKey {
@@ -122,14 +78,14 @@ object Computes {
         if( openCycles.contains(c) ) {
           val key = ComputesKey.fresh()
           computesMap += ((key, ComputesRecord.CyclicReference(openCycles(c))))
-          //typeMap += ((key, c.getType))
+          typeMap += ((key, c.getType))
           key
         } else {
           // ensure all references other than names and cycles are unique by never deduplicating
           val entryKey = ComputesKey.fresh()
           val bodyKey = readGraph(c.ref, openCycles + ((c, entryKey)), bindings)
           computesMap += ((entryKey, ComputesRecord.EnterCycle(entryKey)))
-          //typeMap += ((key, c.getType))
+          typeMap += ((entryKey, c.getType))
           entryKey
         }
       }
@@ -179,6 +135,7 @@ object Computes {
         }
         val key = ComputesKey.fresh()
         computesMap += ((key, result))
+        typeMap += ((key, computes.theType))
         key
       }
     }
@@ -216,9 +173,11 @@ object Computes {
   }
 
   inline def ref[T](body : (given QuoteContext)=>Computes[T]) : Computes[T] =
-    Ref(body)
+    Ref(body, (given QuoteContext)=>summonFrom {
+      case tp : Type[T] => tp
+    })
 
-  def let[V:Type,T](value : Computes[V], body : Computes[V]=>Computes[T]) = {
+  def let[V:Type,T:Type](value : Computes[V], body : Computes[V]=>Computes[T]) = {
     val name = Name[V]()
     NameBinding(name, value, body(name))
   }
@@ -246,7 +205,11 @@ object Computes {
     }
   }
 
-  inline def fun[Args <: Tuple, Result, F](fn : F)(given tpl : TupledFunction[F,Args=>Computes[Result]])(given Tuple.IsMappedBy[Computes][Args]) : Computes[Tuple.InverseMap[Args,Computes]==>Result] = {
+  inline def fun[Args <: Tuple : Type, Result : Type, F]
+                (fn : F)
+                (given tpl : TupledFunction[F,Args=>Computes[Result]])
+                (given Tuple.IsMappedBy[Computes][Args], QuoteContext)
+  : Computes[Tuple.InverseMap[Args,Computes]==>Result] = {
     type PlainArgs = Tuple.InverseMap[Args,Computes]
     val args : Args = makeFunctionArgs[PlainArgs].asInstanceOf[Args]
     Function(tpl.tupled(fn)(args), args.toArray.toList.asInstanceOf[List[Name[_]]])
@@ -260,10 +223,10 @@ object Computes {
     def apply(f : F) = fun(f)
   }*/
 
-  def (c : Computes[Args==>Result]) apply[Args <: Tuple, Result](args : Tuple.Map[Args,Computes]) : Computes[Result] =
+  def (c : Computes[Args==>Result]) apply[Args <: Tuple, Result : Type](args : Tuple.Map[Args,Computes]) : Computes[Result] =
     Application(c, args.toArray.toList.asInstanceOf[List[Computes[_]]])
 
-  def (c : Computes[Boolean]) branch[Result](t : Computes[Result], f : Computes[Result]) : Computes[Result] =
+  def (c : Computes[Boolean]) branch[Result : Type](t : Computes[Result], f : Computes[Result]) : Computes[Result] =
     Branch(c, t, f)
 
   def const[T : Type : Liftable](t : T) : Computes[T] =
@@ -273,66 +236,60 @@ object Computes {
     def apply(t : T) = const(t)
   }
 
-  final case class Composite[T : DeferredType, R <: Rule.Instance[T]](
+  final case class Composite[T : Type, R <: Rule.Instance[T]](
     val rule : R,
     val rewrite : Rule.RewriteContext=>Rule.CRewrite[T],
     val lower : Rule.RewriteContext=>Rule.CRewrite[T],
     val members : List[Computes[_]],
     val handles : List[CHandle[_]]) extends Computes[T]
   {
-    val getType = summon[DeferredType[T]].getType
+    val theType = summon[Type[T]]
   }
   
-  final case class Code[Result : DeferredType](val fn : List[Expr[_]]=>Expr[Result], val args : List[Computes[_]]) extends Computes[Result] {
-    def getType = summon[DeferredType[Result]].getType
+  final case class Code[Result : Type](val fn : List[Expr[_]]=>Expr[Result], val args : List[Computes[_]]) extends Computes[Result] {
+    val theType = summon[Type[Result]]
   }
 
-  final case class Application[Args <: Tuple, Result : DeferredType](val fn : Computes[Args==>Result], val args : List[Computes[_]]) extends Computes[Result] {
-    def getType = summon[DeferredType[Result]].getType
+  final case class Application[Args <: Tuple, Result : Type](val fn : Computes[Args==>Result], val args : List[Computes[_]]) extends Computes[Result] {
+    val theType = summon[Type[Result]]
   }
 
-  final case class Function[Args <: Tuple : DeferredType, Result : DeferredType](
+  final case class Function[Args <: Tuple : Type, Result : Type](
     val body : Computes[Result],
-    val args : List[Name[_]]) extends Computes[Args==>Result]
+    val args : List[Name[_]])(given QuoteContext) extends Computes[Args==>Result]
   {
-    def getType = {
-      val argsDef = summon[DeferredType[Args]]
-      val resultDef = summon[DeferredType[Result]]
-      given Type[Args] = argsDef.getType
-      given Type[Result] = resultDef.getType
-      summon[Type[Args==>Result]]
-    }
+    val theType = summon[Type[Args==>Result]]
   }
 
-  final case class NameBinding[V, T : DeferredType](val name : Name[V], val value : Computes[V], val body : Computes[T]) extends Computes[T] {
-    def getType = summon[DeferredType[T]].getType
+  final case class NameBinding[V, T : Type](val name : Name[V], val value : Computes[V], val body : Computes[T]) extends Computes[T] {
+    val theType = summon[Type[T]]
   }
 
-  final case class Constant[T : DeferredType : Liftable](val v : T) extends Computes[T] {
-    def getType = summon[DeferredType[T]].getType
+  final case class Constant[T : Type : Liftable](val v : T) extends Computes[T] {
+    val theType = summon[Type[T]]
     val liftable = summon[Liftable[T]]
   }
 
-  final case class Branch[T : DeferredType](val condition : Computes[Boolean], val t : Computes[T], val f : Computes[T]) extends Computes[T] {
-    def getType = summon[DeferredType[T]].getType
+  final case class Branch[T : Type](val condition : Computes[Boolean], val t : Computes[T], val f : Computes[T]) extends Computes[T] {
+    val theType = summon[Type[T]]
   }
 
-  final case class DispatchTable[Argument : DeferredType : Liftable, Result : DeferredType](
+  final case class DispatchTable[Argument : Type : Liftable, Result : Type](
     val input : Computes[Argument],
     val pairs : List[(Argument,Computes[Result])],
     val default : Option[Computes[Result]]) extends Computes[Result]
   {
-    def getType = summon[DeferredType[Result]].getType
-    def argType(given QuoteContext) = summon[DeferredType[Argument]].getType
+    val theType = summon[Type[Result]]
+    val argType = summon[Type[Argument]]
     val argLiftable = summon[Liftable[Argument]]
   }
 
-  final class Name[T : DeferredType] extends Computes[T] {
-    def getType = summon[DeferredType[T]].getType
+  final class Name[T : Type] extends Computes[T] {
+    val theType = summon[Type[T]]
   }
 
-  final class Ref[T : DeferredType](val ref : (given QuoteContext)=>Computes[T]) extends Computes[T] {
-    def getType = summon[DeferredType[T]].getType
+  final class Ref[T](val ref : (given QuoteContext)=>Computes[T], val getType : (given QuoteContext)=>Type[T]) extends Computes[T] {
+    val theType = null
   }
 
 }
