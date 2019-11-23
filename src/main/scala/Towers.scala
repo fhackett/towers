@@ -19,11 +19,11 @@ object Meta {
 
 object LazyTree {
   sealed abstract class Value[T] {
-    def map[T2](fn : T=>T2) : Value[T2] =
+    final def map[T2](fn : T=>T2) : Value[T2] =
       flatMap(value => Value(fn(value)))
-    def flatMap[T2](fn : T=>Value[T2]) : Value[T2] =
+    final def flatMap[T2](fn : T=>Value[T2]) : Value[T2] =
       FlatMapValue(this, fn)
-    def updated[V](from : Value[V], to : V) : Value[T] =
+    final def updated[V](from : Value[V], to : V) : Value[T] =
       UpdatedValue(this, from, to)
 
     def result : T = {
@@ -40,18 +40,23 @@ object LazyTree {
           copy(results=results -- keys)
       }
 
-      def impl[T](self : Value[T], resultSoFar : Result) : Result =
+      // avoid potentially blowing stack when computing the result
+      import scala.util.control.TailCalls._
+
+      def impl[T](self : Value[T], resultSoFar : Result) : TailRec[Result] =
         if( resultSoFar.results.contains(self) ) {
-          resultSoFar
+          done(resultSoFar)
         } else {
           self match {
             case self : ConstValue[T] =>
-              resultSoFar.updated(self, self.value)
+              done(resultSoFar.updated(self, self.value))
             case self : FlatMapValue[t1,T] => {
-              val result1 = impl(self.from, resultSoFar)
-              val next = self.fn(result1.results(self.from).asInstanceOf[t1])
-              val result2 = impl(next, result1)
-              result2.dependsOn(self, self.from).dependsOn(self, next).alias(self, next)
+              tailcall(impl(self.from, resultSoFar)).flatMap { result1 =>
+                val next = self.fn(result1.results(self.from).asInstanceOf[t1])
+                tailcall(impl(next, result1)).map { result2 =>
+                  result2.dependsOn(self, self.from).dependsOn(self, next).alias(self, next)
+                }
+              }
             }
             case self : UpdatedValue[T,v] => {
               // calculate closure of all dependencies of the value we propose to change
@@ -63,13 +68,23 @@ object LazyTree {
               val allDepends = findAllDepends(self.key, Set.empty)
               // wipe all dependencies of the changed value, then set the new value (in case the value depends on itself)
               // then we can calculate only what we need of the body, possibly recalculating nullified dependencies
-              impl(self.over, resultSoFar.without(allDepends).updated(self.key, self.value))
-                .alias(self, self.over).dependsOn(self, self.over)
+              tailcall(impl(self.over, resultSoFar.without(allDepends).updated(self.key, self.value)))
+                .map(_.alias(self, self.over).dependsOn(self, self.over)).map { result =>
+                // now, to preserve the declarative evaluation (referring to the updated tree again without the Updates)
+                // we clean up all self.key's dependencies, leaving only our own result
+                val value = result.results(self).asInstanceOf[T]
+                result.without(allDepends + self.key).updated(self, value)
+                // performance thoughts: it is reasonably cheap to purge all the potentially invalid cached values
+                // if something needs recomputing it will happen later, if at all
+                // slowdown would come from having many deep dependency networks, in the order of how many nodes depend on what
+                // you're changing
+                // if you don't change anything you get normal performance, if you do you may have to recompute dependent trees
+              }
             }
           }
         }
 
-      impl(this, Result()).results(this).asInstanceOf[T]
+      impl(this, Result()).result.results(this).asInstanceOf[T]
     }
   }
   object Value {

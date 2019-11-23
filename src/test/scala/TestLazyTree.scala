@@ -66,12 +66,10 @@ class TestLazyTree {
   }
 
   @Test
-  def testOddSideEffect = {
+  def testRecallOriginalValue = {
     val v = Value(1)
-    // updating a value updates it permanently, even outside of the body of "updated"
-    // this breaks the declarative nature of the system ... which is concerning, since I'm probably going to rely on that
-    // committing first before I address that
-    Assert.assertEquals(4, v.updated(v, 2).flatMap(a => v.map(b => a+b)).result)
+    // referencing v again outside the updated context should still return 1
+    Assert.assertEquals(3, v.updated(v, 2).flatMap(a => v.map(b => a+b)).result)
   }
 }
 
