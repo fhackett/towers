@@ -17,6 +17,70 @@ object Meta {
   def rewrite[T](t : T)(fn : T=>T) : T = ???
 }
 
+object LazyTree {
+  sealed abstract class Value[T] {
+    def map[T2](fn : T=>T2) : Value[T2] =
+      flatMap(value => Value(fn(value)))
+    def flatMap[T2](fn : T=>Value[T2]) : Value[T2] =
+      FlatMapValue(this, fn)
+    def updated[V](from : Value[V], to : V) : Value[T] =
+      UpdatedValue(this, from, to)
+
+    def result : T = {
+      case class Result(val results : Map[Value[_],Any] = Map.empty, val dependencies : Map[Value[_],Set[Value[_]]] = Map.empty) {
+        def updated[V](name : Value[V], value : V) : Result =
+          copy(results.updated(name, value))
+        def alias[V](name : Value[V], value : Value[V]) : Result =
+          copy(results=results + ((name, results(value))))
+        def dependsOn(deriving : Value[_], base : Value[_]) : Result =
+          copy(dependencies=dependencies + ((base, listDependsOn(base) + deriving)))
+        def listDependsOn(key : Value[_]) : Set[Value[_]] =
+          dependencies.getOrElse(key, Set.empty)
+        def without(keys : Iterable[Value[_]]) : Result =
+          copy(results=results -- keys)
+      }
+
+      def impl[T](self : Value[T], resultSoFar : Result) : Result =
+        if( resultSoFar.results.contains(self) ) {
+          resultSoFar
+        } else {
+          self match {
+            case self : ConstValue[T] =>
+              resultSoFar.updated(self, self.value)
+            case self : FlatMapValue[t1,T] => {
+              val result1 = impl(self.from, resultSoFar)
+              val next = self.fn(result1.results(self.from).asInstanceOf[t1])
+              val result2 = impl(next, result1)
+              result2.dependsOn(self, self.from).dependsOn(self, next).alias(self, next)
+            }
+            case self : UpdatedValue[T,v] => {
+              // calculate closure of all dependencies of the value we propose to change
+              def findAllDepends(key : Value[_], found : Set[Value[_]]) : Set[Value[_]] = {
+                val deps = resultSoFar.listDependsOn(key).filter(!found(_))
+                val innerFound = deps ++ found
+                deps ++ deps.flatMap(dep => findAllDepends(dep, innerFound))
+              }
+              val allDepends = findAllDepends(self.key, Set.empty)
+              // wipe all dependencies of the changed value, then set the new value (in case the value depends on itself)
+              // then we can calculate only what we need of the body, possibly recalculating nullified dependencies
+              impl(self.over, resultSoFar.without(allDepends).updated(self.key, self.value))
+                .alias(self, self.over).dependsOn(self, self.over)
+            }
+          }
+        }
+
+      impl(this, Result()).results(this).asInstanceOf[T]
+    }
+  }
+  object Value {
+    def apply[T](value : T) : Value[T] =
+      ConstValue(value)
+  }
+  private class ConstValue[T](val value : T) extends Value[T]
+  private class FlatMapValue[T1,T2](val from : Value[T1], val fn : T1=>Value[T2]) extends Value[T2]
+  private class UpdatedValue[T,V](val over : Value[T], val key : Value[V], val value : V) extends Value[T]
+}
+
 object Compiler {
 
   given Meta.Uninterpreted[Int]
