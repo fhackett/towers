@@ -223,10 +223,17 @@ object Compiler {
                         }
                       })
                     }).toMap
+                    val methodWithoutBody : DefDef =
+                      '{
+                        def ifYouAreSeeingThisSomethingBroke = ???
+                      }.unseal match {
+                        case Inlined(_, _, Block(List(theDefDef), _)) =>
+                          DefDef.copy(theDefDef)(sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, None)
+                      }
                     val recSelf = new ProcResult {
                       val referencedSymbols = Value(Set(sym))
                       val inferredInfo = Value(InferredInfo.Opaque)
-                      val term = Value('{???}.unseal)
+                      val term = Value(Ref(methodWithoutBody.symbol))
                       val definitions = Value(Vector.empty)
                     }
                     procTerm(tree.rhs.get, knownSyms ++ paramResults + ((sym, Value(recSelf)))).flatMap { bodyResult =>
@@ -235,14 +242,12 @@ object Compiler {
                         new ProcResult {
                           val referencedSymbols = bodyResult.referencedSymbols
                           val inferredInfo = Value(InferredInfo.Opaque) // TODO: or inlineable
-                          val definition = bodyResult.term.map { bodyTerm =>
-                            DefDef.copy(tree)(sym.fullName, Nil /*TODO: handle type params*/, tree.paramss, tree.returnTpt, Some(bodyTerm))
-                          }
-                          val term = definition.map { defn =>
-                            Ref(defn.symbol)
-                          }
+                          val term = Value(Ref(methodWithoutBody.symbol))
                           val definitions = bodyResult.definitions.flatMap { bodyDefs =>
-                            definition.map(d => bodyDefs :+ d)
+                            bodyResult.term.map { bodyTerm =>
+                              bodyDefs :+ DefDef.copy(methodWithoutBody)(
+                                sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
+                            }
                           }
                         }
                       }
