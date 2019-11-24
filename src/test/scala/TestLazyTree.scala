@@ -71,5 +71,23 @@ class TestLazyTree {
     // referencing v again outside the updated context should still return 1
     Assert.assertEquals(3, v.updated(v, 2).flatMap(a => v.map(b => a+b)).result)
   }
+
+  @Test
+  def testNestedDepsChanges = {
+    val v1 = Value(1)
+    val v2 = for {
+      a <- v1
+      b <- v1.updated(v1, a+1)
+    } yield a+b
+    Assert.assertEquals(3, v2.result)
+    println("---")
+    Assert.assertEquals(5, v2.updated(v1, 2).result)
+    val v3 = for {
+      a <- v2.updated(v1, 2)
+      b <- v2
+    } yield a+b
+    println("---")
+    Assert.assertEquals(8, v3.result)
+  }
 }
 

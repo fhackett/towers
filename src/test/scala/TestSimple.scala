@@ -39,7 +39,6 @@ class TestSimple {
 
   def add1(x : Int) = x+1
 
-  /*
   @Test
   def testAdd1 = {
     Assert.assertEquals(2, Compiler.compile(add1(1)))
@@ -49,7 +48,6 @@ class TestSimple {
   def testAdd1Fn = {
     Assert.assertEquals(2, Compiler.compile[Int=>Int](add1)(1))
   }
-  */
 
   /*
   def listMap(lst : List[Int], fn : Int=>Int) : List[Int] =
