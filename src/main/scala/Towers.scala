@@ -27,7 +27,7 @@ object LazyTree {
       UpdatedValue(this, from, to)
 
     def result : T = {
-      case class Result(val results : Map[Value[_],Any] = Map.empty, val dependencies : Map[Value[_],Set[Value[_]]] = Map.empty) {
+      final case class Result(val results : Map[Value[_],Any] = Map.empty, val dependencies : Map[Value[_],Set[Value[_]]] = Map.empty, val flatCache : Map[(Value[_],Any),Value[_]] = Map.empty) {
         def updated[V](name : Value[V], value : V) : Result =
           copy(results.updated(name, value))
         def alias[V](name : Value[V], value : Value[V]) : Result =
@@ -38,23 +38,41 @@ object LazyTree {
           dependencies.getOrElse(key, Set.empty)
         def without(keys : Iterable[Value[_]]) : Result =
           copy(results=results -- keys)
+
+        def getFlatCached[T1,T2](self : Value[T2], v : T1) : Option[Value[T2]] =
+          flatCache.get((self,v)).asInstanceOf[Option[Value[T2]]]
+        def cacheFlat[T1,T2](self : Value[T2], value : T1, next : Value[T2]) : Result =
+          copy(flatCache=flatCache + (((self,value), next)))
       }
 
       // avoid potentially blowing stack when computing the result
       import scala.util.control.TailCalls._
 
+      var hitCount = 0
+
       def impl[T](self : Value[T], resultSoFar : Result) : TailRec[Result] =
         if( resultSoFar.results.contains(self) ) {
           done(resultSoFar)
         } else {
+          hitCount += 1
           self match {
             case self : ConstValue[T] =>
               done(resultSoFar.updated(self, self.value()))
             case self : FlatMapValue[t1,T] => {
               tailcall(impl(self.from, resultSoFar)).flatMap { result1 =>
-                val next = self.fn(result1.results(self.from).asInstanceOf[t1])
-                tailcall(impl(next, result1.dependsOn(next,self.from))).map { result2 =>
-                  result2.dependsOn(self, next).alias(self, next)
+                // cache flatMap results, since if the value is the same then the next tree should not be changing
+                // note: this combined with not establishing a dependency between value and projected next allows
+                //  us to quietly swallow internal changes that do not actually affect the resulting value
+                val (result2, next) = result1.getFlatCached(self, result1.results(self.from)) match {
+                  case Some(next) => (result1, next)
+                  case None => {
+                    val value = result1.results(self.from).asInstanceOf[t1]
+                    val nxt = self.fn(value)
+                    (result1.cacheFlat(self, value, nxt), nxt)
+                  }
+                }
+                tailcall(impl(next, result2)).map { result3 =>
+                  result3.dependsOn(self, self.from).dependsOn(self, next).alias(self, next)
                 }
               }
             }
@@ -86,7 +104,10 @@ object LazyTree {
           }
         }
 
-      impl(this, Result()).result.results(this).asInstanceOf[T]
+      val res = impl(this, Result()).result.results(this).asInstanceOf[T]
+      println(s"PERF HITS $hitCount")
+      //(new Throwable).printStackTrace()
+      res
     }
   }
   object Value {
@@ -223,9 +244,10 @@ object Compiler {
                         }
                       })
                     }).toMap
+                    val tpe = tree.returnTpt.tpe.seal.asInstanceOf[quoted.Type[Any]]
                     val methodWithoutBody : DefDef =
                       '{
-                        def ifYouAreSeeingThisSomethingBroke = ???
+                        def ifYouAreSeeingThisSomethingBroke : ${tpe} = ???
                       }.unseal match {
                         case Inlined(_, _, Block(List(theDefDef), _)) =>
                           DefDef.copy(theDefDef)(sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, None)
@@ -242,11 +264,14 @@ object Compiler {
                         new ProcResult {
                           val referencedSymbols = bodyResult.referencedSymbols
                           val inferredInfo = Value(InferredInfo.Opaque) // TODO: or inlineable
-                          val term = Value(Ref(methodWithoutBody.symbol))
+                          val methodWithBody = bodyResult.term.map { bodyTerm =>
+                            DefDef.copy(methodWithoutBody)(
+                              sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
+                          }
+                          val term = methodWithBody.map { methodWithBody => Ref(methodWithBody.symbol) }
                           val definitions = bodyResult.definitions.flatMap { bodyDefs =>
-                            bodyResult.term.map { bodyTerm =>
-                              bodyDefs :+ DefDef.copy(methodWithoutBody)(
-                                sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
+                            methodWithBody.map { methodWithBody =>
+                              bodyDefs :+ methodWithBody
                             }
                           }
                         }

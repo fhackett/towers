@@ -26,6 +26,7 @@ class TestSimple {
 
   def return1 = 1
 
+  /*
   @Test
   def testReturn1 = {
     Assert.assertEquals(1, Compiler.compile(return1))
@@ -47,7 +48,7 @@ class TestSimple {
   @Test
   def testAdd1Fn = {
     Assert.assertEquals(2, Compiler.compile[Int=>Int](add1)(1))
-  }
+  }*/
 
   /*
   def listMap(lst : List[Int], fn : Int=>Int) : List[Int] =
