@@ -113,6 +113,15 @@ object LazyTree {
   object Value {
     def apply[T](value : =>T) : Value[T] =
       ConstValue(()=>value)
+
+    def lifted[T, I[_] <: Iterable[_]](values : I[Value[T]]) : Value[I[T]] = {
+      val factory = values.iterableFactory
+      values.foldLeft(Value(Nil : List[T])) { (acc, v) =>
+        acc.flatMap { acc =>
+          v.asInstanceOf[Value[T]].map(v => v :: acc)
+        }
+      }.map(rList => factory.from(rList.reverse).asInstanceOf[I[T]])
+    }
   }
   private class ConstValue[T](val value : ()=>T) extends Value[T]
   private class FlatMapValue[T1,T2](val from : Value[T1], val fn : T1=>Value[T2]) extends Value[T2]
@@ -131,7 +140,13 @@ object Compiler {
     object InferredInfo {
       case object Opaque extends InferredInfo
       case class Literal(val v : Any) extends InferredInfo
-      case class Inlineable(val params : List[Value[ProcResult]], val body : Value[ProcResult]) extends InferredInfo
+      case class Inlineable(
+        // definition, value used by fn, arg value
+        val knownParams : List[(ValDef,Value[ProcResult],Value[ProcResult])],
+        // definition, value used by fn
+        val unknownParams : List[List[(ValDef,Value[ProcResult])]],
+        val body : Value[ProcResult]
+      ) extends InferredInfo
     }
 
     // return symbolic tree as transformed as possible
@@ -143,35 +158,49 @@ object Compiler {
     //  (any remaining function arguments or val bindings will need to introduce their own bindings as they go)
     // include vector/map/set that accumulates functions known to be recursive
 
-    trait ProcResult {
+    trait ProcResultDef {
       val referencedSymbols : Value[Set[Symbol]]
       val inferredInfo : Value[InferredInfo]
       val term : Value[Term]
       val definitions : Value[Vector[Statement]]
     }
 
+    case class ProcResult(
+      val referencedSymbols : Value[Set[Symbol]],
+      val inferredInfo : Value[InferredInfo],
+      val term : Value[Term],
+      val definitions : Value[Vector[Statement]]
+    ) extends ProcResultDef
+
+    def mkResult(d : ProcResultDef) : ProcResult =
+      ProcResult(
+        referencedSymbols=d.referencedSymbols,
+        inferredInfo=d.inferredInfo,
+        term=d.term,
+        definitions=d.definitions)
+
     def procTerm(term : Term, knownSyms : Map[Symbol,Value[ProcResult]]) : Value[ProcResult] = {
       println(s"!! $term")
       term match {
         case Inlined(call, bindings, body) =>
           procTerm(body, knownSyms).map { result =>
-            new ProcResult {
+            mkResult(new {
               val referencedSymbols = result.referencedSymbols
               val inferredInfo = result.inferredInfo
               val term = result.term.map { term =>
                 Inlined(call, bindings, term)
               }
               val definitions = result.definitions
-            }
+            })
           }
         case l @ Literal(v) =>
           Value {
-            new ProcResult {
+            mkResult(new {
               val referencedSymbols = Value(Set.empty)
               val inferredInfo = Value(InferredInfo.Literal(v))
               val term = Value(l)
               val definitions = Value(Vector.empty)
-            }
+            })
           }
         case Block(statements, expr) => {
           error("TODO", term.pos)
@@ -185,30 +214,70 @@ object Compiler {
             }
           }
           procTerm(fun, knownSyms).flatMap { fnResult =>
-            fnResult.inferredInfo.map {
-              // TODO: inlining if we deduce that we can
-              case _ =>
-                new ProcResult {
-                  val referencedSymbols = fnResult.referencedSymbols.flatMap { fnSyms =>
-                    argReferencedSymbols.map(argSyms => fnSyms ++ argSyms)
+            fnResult.inferredInfo.flatMap {
+              case InferredInfo.Inlineable(knownParams, List(lastUnknownParams), body) => {
+                val finalParams : List[(ValDef,Value[ProcResult],Value[ProcResult])] = (knownParams ++ (lastUnknownParams zip argResults).map {
+                  case ((vd,inFn),argV) => (vd,inFn,argV)
+                })
+                for {
+                  inFns <- Value.lifted(finalParams.map(pair => pair._2.map(_.inferredInfo)))
+                  nextVs <- Value.lifted(finalParams.map(triple => triple._3.flatMap(_.inferredInfo)))
+                  newBody <- (inFns zip nextVs).foldLeft(body) { (acc, pair) =>
+                    acc.updated(pair._1, pair._2)
                   }
-                  val inferredInfo = Value(InferredInfo.Opaque)
-                  val term = fnResult.term.flatMap { fnTerm =>
-                    argResults.foldLeft(Value(Nil) : Value[List[Term]]) { (acc, argResult) =>
-                      acc.flatMap { acc =>
-                        argResult.flatMap( argResult => argResult.term.map(t => t :: acc))
-                      }
-                    }.map { argTerms =>
-                      Apply(fnTerm, argTerms.reverse)
+                } yield mkResult(new {
+                    val referencedSymbols = fnResult.referencedSymbols.flatMap { fnSyms =>
+                      argReferencedSymbols.map(argSyms => fnSyms ++ argSyms)
                     }
-                  }
-                  val definitions = fnResult.definitions.flatMap { fnDefinitions =>
-                    argResults.foldLeft(Value(fnDefinitions)) { (acc, argResult) =>
-                      acc.flatMap { acc =>
-                        argResult.flatMap( argResult => argResult.definitions.map(ds => acc ++ ds))
+                    val inferredInfo = newBody.inferredInfo
+                    val term =
+                      for {
+                        bodyTerm <- newBody.term
+                        vVals <- Value.lifted(finalParams.map(triple => triple._3.flatMap(_.term)))
+                      } yield Block(
+                        (finalParams.map(_._1) zip vVals).map {
+                          case (d @ ValDef(name, tpt, None), v) =>
+                            ValDef.copy(d)(name, tpt, Some(v))
+                        },
+                        bodyTerm)
+                    val definitions = newBody.definitions
+                  })
+              }
+              case info =>
+                Value {
+                  mkResult(new {
+                    val referencedSymbols = fnResult.referencedSymbols.flatMap { fnSyms =>
+                      argReferencedSymbols.map(argSyms => fnSyms ++ argSyms)
+                    }
+                    val inferredInfo = Value(info match {
+                      case InferredInfo.Inlineable(knownParams, List(lastUnknownParams), body) =>
+                        ???
+                      case InferredInfo.Inlineable(knownParams, outerUnknownParams :: otherUnknownParams, body) =>
+                        InferredInfo.Inlineable(
+                          knownParams=knownParams ++ (outerUnknownParams zip argResults).map {
+                            case (a, b) => a++Tuple1(b)
+                          },
+                          unknownParams=otherUnknownParams,
+                          body=body)
+                      case _ => InferredInfo.Opaque
+                    })
+                    val term = fnResult.term.flatMap { fnTerm =>
+                      argResults.foldLeft(Value(Nil) : Value[List[Term]]) { (acc, argResult) =>
+                        acc.flatMap { acc =>
+                          argResult.flatMap( argResult => argResult.term.map(t => t :: acc))
+                        }
+                      }.map { argTerms =>
+                        Apply(fnTerm, argTerms.reverse)
                       }
                     }
-                  }
+                    val definitions = fnResult.definitions.flatMap { fnDefinitions =>
+                      argResults.foldLeft(Value(fnDefinitions)) { (acc, argResult) =>
+                        acc.flatMap { acc =>
+                          argResult.flatMap( argResult => argResult.definitions.map(ds => acc ++ ds))
+                        }
+                      }
+                    }
+                  })
                 }
             }
           }
@@ -222,28 +291,27 @@ object Compiler {
               searchImplicit('[Meta.Uninterpreted[${tpe}]].unseal.tpe) match {
                 case _ : ImplicitSearchSuccess =>
                   procTerm(base, knownSyms).map { baseResult =>
-                    new ProcResult {
+                    mkResult(new {
                       val referencedSymbols = baseResult.referencedSymbols
                       val inferredInfo = Value(InferredInfo.Opaque)
                       val term = baseResult.term.map { baseTerm =>
                         Select(baseTerm, sym)
                       }
                       val definitions = baseResult.definitions
-                    }
+                    })
                   }
                 case _ : NoMatchingImplicits =>
                   if( sym.isDefDef ) {
                     val tree = sym.tree.asInstanceOf[DefDef]
-                    val paramResults : Map[Symbol,Value[ProcResult]] = tree.paramss.flatMap(_.map { param =>
-                      (param.symbol, Value {
-                        new ProcResult {
-                          val referencedSymbols = Value(Set(param.symbol))
-                          val inferredInfo = Value(InferredInfo.Opaque)
-                          val term = Value(Ref(param.symbol))
-                          val definitions = Value(Vector.empty)
-                        }
-                      })
-                    }).toMap
+                    val unknownParams : List[List[(ValDef,Value[ProcResult])]] = tree.paramss.map(_.map { param =>
+                      (param, Value(mkResult(new {
+                        val referencedSymbols = Value(Set(param.symbol))
+                        val inferredInfo = Value(InferredInfo.Opaque)
+                        val term = Value(Ref(param.symbol))
+                        val definitions = Value(Vector.empty)
+                      })))
+                    })
+                    val paramResults : Map[Symbol,Value[ProcResult]] = unknownParams.flatMap(_.map(p => (p._1.symbol, p._2))).toMap
                     val tpe = tree.returnTpt.tpe.seal.asInstanceOf[quoted.Type[Any]]
                     val methodWithoutBody : DefDef =
                       '{
@@ -252,28 +320,42 @@ object Compiler {
                         case Inlined(_, _, Block(List(theDefDef), _)) =>
                           DefDef.copy(theDefDef)(sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, None)
                       }
-                    val recSelf = new ProcResult {
+                    val recSelf = mkResult(new {
                       val referencedSymbols = Value(Set(sym))
                       val inferredInfo = Value(InferredInfo.Opaque)
                       val term = Value(Ref(methodWithoutBody.symbol))
                       val definitions = Value(Vector.empty)
-                    }
+                    })
                     procTerm(tree.rhs.get, knownSyms ++ paramResults + ((sym, Value(recSelf)))).flatMap { bodyResult =>
                       bodyResult.referencedSymbols.map { refSymbols =>
-                        // TODO: if( refSymbols(sym) ) {
-                        new ProcResult {
-                          val referencedSymbols = bodyResult.referencedSymbols
-                          val inferredInfo = Value(InferredInfo.Opaque) // TODO: or inlineable
-                          val methodWithBody = bodyResult.term.map { bodyTerm =>
-                            DefDef.copy(methodWithoutBody)(
-                              sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
-                          }
-                          val term = methodWithBody.map { methodWithBody => Ref(methodWithBody.symbol) }
-                          val definitions = bodyResult.definitions.flatMap { bodyDefs =>
-                            methodWithBody.map { methodWithBody =>
-                              bodyDefs :+ methodWithBody
+                        // not-recursive def with no () must be inlined at Select, because there will be no Apply to catch inlining later
+                        if( tree.paramss.isEmpty && !refSymbols(sym) ) {
+                          bodyResult
+                        } else {
+                          mkResult(new {
+                            val referencedSymbols = bodyResult.referencedSymbols
+                            val inferredInfo =
+                              if( refSymbols(sym) ) {
+                                // it's recursive, so pretend we don't know what it is
+                                Value(InferredInfo.Opaque)
+                              } else {
+                                Value(InferredInfo.Inlineable(
+                                  knownParams=Nil,
+                                  unknownParams=unknownParams,
+                                  body=Value(bodyResult)
+                                ))
+                              }
+                            val methodWithBody = bodyResult.term.map { bodyTerm =>
+                              DefDef.copy(methodWithoutBody)(
+                                sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
                             }
-                          }
+                            val term = methodWithBody.map { methodWithBody => Ref(methodWithBody.symbol) }
+                            val definitions = bodyResult.definitions.flatMap { bodyDefs =>
+                              methodWithBody.map { methodWithBody =>
+                                bodyDefs :+ methodWithBody
+                              }
+                            }
+                          })
                         }
                       }
                     }
