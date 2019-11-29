@@ -170,8 +170,29 @@ object Compiler {
         term=d.term,
         definitions=d.definitions)
 
-    def procDefDef(tree : DefDef, knownSyms : Map[Symbol,Value[ProcResult]]) : Value[(ProcResult,Value[DefDef])] = {
-      val sym = tree.symbol
+    def cloneDefDef(tree : DefDef) : DefDef = {
+      val tpe = tree.returnTpt.tpe.seal.asInstanceOf[quoted.Type[Any]]
+      '{
+        def ifYouAreSeeingThisSomethingBroke(x : Int) : ${tpe} = ???
+      }.unseal match {
+        case Inlined(_, _, Block(List(theDefDef), _)) =>
+          DefDef.copy(theDefDef)(tree.symbol.fullName, tree.typeParams, tree.paramss.map(_.map { param =>
+            val vtpe = param.tpt.tpe.seal.asInstanceOf[quoted.Type[Any]]
+            val clone = '{ val cloned : ${vtpe} = ??? }.unseal match {
+              case Inlined(_, _, Block(List(vdef), _)) => vdef
+            }
+            ValDef.copy(clone)(param.symbol.name, param.tpt, param.rhs)
+          }), tree.returnTpt, None)
+      }
+    }
+
+    def procDefDef(treeNotCloned : DefDef, knownSyms : Map[Symbol,Value[ProcResult]]) : Value[(ProcResult,Value[DefDef])] = {
+      val origSym = treeNotCloned.symbol
+      val tree = cloneDefDef(treeNotCloned)
+      println(s"TR ${tree.show}")
+      val cloneToParam : Map[Symbol,Symbol] = (tree.paramss.flatten zip treeNotCloned.paramss.flatten).map {
+        case (cParam, ncParam) => (cParam.symbol, ncParam.symbol)
+      }.toMap
       val unknownParams : List[List[(ValDef,Value[ProcResult])]] = tree.paramss.map(_.map { param =>
         (param, Value(mkResult(new {
           val referencedSymbols = Value(Set(param.symbol))
@@ -180,35 +201,29 @@ object Compiler {
           val definitions = Value(Vector.empty)
         })))
       })
-      val paramResults : Map[Symbol,Value[ProcResult]] = unknownParams.flatMap(_.map(p => (p._1.symbol, p._2))).toMap
-      val tpe = tree.returnTpt.tpe.seal.asInstanceOf[quoted.Type[Any]]
-      val methodWithoutBody : DefDef =
-        '{
-          def ifYouAreSeeingThisSomethingBroke : ${tpe} = ???
-        }.unseal match {
-          case Inlined(_, _, Block(List(theDefDef), _)) =>
-            DefDef.copy(theDefDef)(sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, None)
-        }
+      val paramResults : Map[Symbol,Value[ProcResult]] = unknownParams.flatMap(_.map(p => (cloneToParam(p._1.symbol), p._2))).toMap
       val recSelf = mkResult(new {
-        val referencedSymbols = Value(Set(sym))
+        val referencedSymbols = Value(Set(origSym))
         val inferredInfo = Value(InferredInfo.Opaque)
-        val term = Value(Ref(methodWithoutBody.symbol))
+        val term = Value(Ref(tree.symbol))
         val definitions = Value(Vector.empty)
       })
-      procTerm(tree.rhs.get, knownSyms ++ paramResults + ((sym, Value(recSelf)))).flatMap { bodyResult =>
+      procTerm(treeNotCloned.rhs.get, knownSyms ++ paramResults + ((origSym, Value(recSelf)))).flatMap { bodyResult =>
         bodyResult.referencedSymbols.map { refSymbols =>
           val methodWithBody = bodyResult.term.map { bodyTerm =>
-            DefDef.copy(methodWithoutBody)(
-              sym.fullName, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
+            DefDef.copy(tree)(
+              tree.symbol.name, tree.typeParams, tree.paramss, tree.returnTpt, Some(bodyTerm))
           }
           // not-recursive def with no () must be inlined at Select, because there will be no Apply to catch inlining later
-          if( tree.paramss.isEmpty && !refSymbols(sym) ) {
-            (bodyResult, methodWithBody)
+          if( tree.paramss.isEmpty && !refSymbols(origSym) ) {
+            (bodyResult.copy(term=bodyResult.term.map { term =>
+              Inlined(Some(treeNotCloned), Nil, term)
+            }), methodWithBody)
           } else {
             val result = mkResult(new {
               val referencedSymbols = bodyResult.referencedSymbols
               val inferredInfo =
-                if( refSymbols(sym) ) {
+                if( refSymbols(origSym) ) {
                   // it's recursive, so pretend we don't know what it is
                   Value(InferredInfo.Opaque)
                 } else {
@@ -286,7 +301,7 @@ object Compiler {
                         term <- rhsResult.term
                       } yield stmts :+ ValDef.copy(d)(name, tpt, Some(term)))
                   }
-                  case _ => error("TODO", term.pos); ???
+                  case d => error("TODO block stmt", d.pos); ???
                 }
             }
           }
@@ -310,7 +325,7 @@ object Compiler {
             }
           }
         }
-        case Apply(fun, args) => {
+        case orig @ Apply(fun, args) => {
           val argResults : List[Value[ProcResult]] = args.map(procTerm(_, knownSyms))
           val argReferencedSymbols = argResults.foldLeft(Value(Set.empty[Symbol])) { (acc, argResult) =>
             acc.flatMap { accVal =>
@@ -338,7 +353,8 @@ object Compiler {
                       for {
                         bodyTerm <- newBody.term
                         vVals <- Value.lifted(finalParams.map(triple => triple._3.flatMap(_.term)))
-                      } yield Block(
+                      } yield Inlined(
+                        Some(orig),
                         (finalParams.map(_._1) zip vVals).map {
                           case (d @ ValDef(name, tpt, None), v) =>
                             ValDef.copy(d)(name, tpt, Some(v))
@@ -433,6 +449,13 @@ object Compiler {
           procTerm(expr, knownSyms).map { procResult =>
             procResult.copy(term=procResult.term.map { term =>
               Typed(term, tpt)
+            })
+          }
+        case Closure(meth, tpt) =>
+          procTerm(meth, knownSyms).map { procResult =>
+            procResult.copy(term=procResult.term.map { term =>
+              println(s"?? ${term.show}")
+              Closure(term, tpt)
             })
           }
       }
