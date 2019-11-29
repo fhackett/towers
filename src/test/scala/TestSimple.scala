@@ -13,16 +13,13 @@ class TestSimple {
     Assert.assertEquals(1, Compiler.compile(1))
   }
 
-  /*
-  // not fixed by -Yretain-trees
   @Test
   def testReturn1Inner = {
     Assert.assertEquals(1, Compiler.compile {
-      def return1 : Int = 1
-      return1
+      def inner : Int = 1
+      inner
     })
   }
-  */
 
   def return1 = 1
 
